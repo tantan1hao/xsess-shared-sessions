@@ -17,19 +17,30 @@
 
 import { writeClaudeCodeSession } from './claude-code.js';
 import { writeCodexSession } from './codex.js';
+import { writeAntigravitySession } from './antigravity.js';
 
-/** 支持真·文件级写回的工具 */
-export const TIER_A = ['claude-code', 'codex'];
+/**
+ * 支持真·文件级写回的工具。
+ *
+ * Antigravity 后来也进来了 —— 摸清结构后发现它需要的同样是「追加 + 新建」而不是改写：
+ * 会话索引 `agyhub_summaries_proto.pb` 的顶层是纯 repeated 字段，
+ * 新增一条等于在文件尾接一段字节，已有内容零改动。
+ * 正文则写进新建的 conversations/<新uuid>.db。安全等级和上面两家相同。
+ */
+export const TIER_A = ['claude-code', 'codex', 'antigravity'];
 
 const WRITERS = {
   'claude-code': writeClaudeCodeSession,
   codex: writeCodexSession,
+  antigravity: writeAntigravitySession,
 };
 
 /**
  * @param {string} tool 目标工具
  * @param {any} pack buildHandoff 的产物
- * @param {{write?:boolean}} opts write=false 只预览，不落盘
+ * @param {{write?:boolean, allowWhileRunning?:boolean}} [opts]
+ *   write=false 只预览，不落盘；
+ *   allowWhileRunning 只对 antigravity 有意义（它要求先退出应用）
  */
 export async function writeSession(tool, pack, opts = {}) {
   const fn = WRITERS[tool];

@@ -61,7 +61,12 @@ node bin/xsess.js list --cwd
 node bin/xsess.js handoff <会话ID> --to claude-code --write
 ```
 
-把某个会话接续到 Claude Code：生成一个新的会话文件，`claude --resume` 里直接出现。
+把某个会话接续到别的工具，`--to` 支持 `claude-code` / `codex` / `antigravity`：
+
+- `claude-code` → `claude --resume` 列表里直接出现
+- `codex` → `codex resume` 列表里直接出现
+- `antigravity` → 出现在它**原生的** Conversation History / Projects 面板里
+  （需要先完全退出 Antigravity）
 
 ---
 
@@ -72,24 +77,34 @@ node bin/xsess.js handoff <会话ID> --to claude-code --write
 | Claude Code | `~/.claude/projects/**/*.jsonl` | ✅ | ✅ 真·写回 |
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl` | ✅ | ✅ 真·写回 |
 | Gemini CLI | `~/.gemini/tmp/*/chats/*.jsonl` | ✅ | — |
-| Antigravity | `~/.gemini/antigravity/conversations/*.db`（SQLite + protobuf） | ✅ | 注入式接力 |
+| Antigravity | `~/.gemini/antigravity/conversations/*.db`（SQLite + protobuf） | ✅ | ✅ 真·写回（进它原生的会话列表） |
 | Cursor | `state.vscdb`（SQLite + JSON） | ✅ | 注入式接力 |
 | Trae CN | 会话正文不在 vscdb（那里只有 UI 布局），疑似 Chromium LevelDB 或服务端 | ❌ | — |
 | Kiro | 未找到本地会话正文（可能存在别处或服务端） | ❌ | — |
 
 ### 为什么写回分两级
 
-**真·写回**（Claude Code / Codex）：两家都是明文 JSONL，格式已完整逆向。
-xsess **只新建**文件，绝不修改任何已存在的会话；创建过的文件记在
-`~/.xsess/written.jsonl`，`xsess undo --write` 一键清掉。
+**真·写回**（Claude Code / Codex / Antigravity）：xsess **只新建**，绝不修改任何已存在的
+会话数据；创建过的文件记在 `~/.xsess/written.jsonl`，`xsess undo --write` 一键清掉。
 
-**注入式接力**（Antigravity / Cursor）：**故意不直写它们的库**。
-Cursor 的 `state.vscdb` 动辄几百 MB、运行时开着 WAL 在写，并发写入等于拿全部历史赌一把；
-Antigravity 是无 schema 的 protobuf，逆向「读」和逆向「写」难度差一个量级 ——
-读错了顶多显示得糙，写错了是静默损坏。
+Claude Code 和 Codex 是明文 JSONL，格式已完整逆向，生成新会话文件让 `--resume` 接上。
 
+Antigravity 是**无 schema 的 protobuf**，一开始看着像不能碰。摸清结构后发现，
+需要做的不是改写而是追加：会话索引 `agyhub_summaries_proto.pb` 的顶层是纯 `repeated 字段1`，
+而 protobuf 的 repeated 就是同一个 tag 重复出现 —— 所以「新增一条会话」在字节层面
+等于在文件尾接一段，已有内容一个字节都不用碰。正文则写进新建的 `conversations/<新uuid>.db`。
+
+产出合法 protobuf 靠的也不是猜字段：拿一条**真实存在**的记录当模板，
+只替换确切知道含义的字段（ID、标题、正文），其余字节原样搬过去。
+模板优先挑同工作区的那条 —— Projects 面板按工作区 URI 分组，挑对模板就等于免费拿到正确分组。
+
+写之前会检查 Antigravity 是否在运行（它把列表缓存在内存里，退出时会覆盖掉追加的内容），
+并在生成的字节上自检「解析必须覆盖到文件末尾、已有字节必须零改动」，不通过就放弃写入。
+
+**注入式接力**（Cursor）：**故意不直写**。`state.vscdb` 动辄几百 MB、
+运行时开着 WAL 在写，并发写入等于拿全部历史赌一把。
 替代方案在体验上等价：侧边栏点「接续到这里」→ 交接包落到工作区 `.xsess/` 并复制到剪贴板 →
-在聊天框粘贴或 `@` 引用。一次点击，零损坏风险。
+在聊天框粘贴或 `@` 引用。
 
 ---
 
@@ -126,6 +141,10 @@ token 存在 `~/.xsess/daemon.json`（0600），跨站请求带不上 Authorizat
 ```
 
 xsess 对各家工具的会话目录**只读**，唯一的例外是 `handoff --to` 显式创建新会话文件。
+
+只读这件事比看上去微妙：用 `?mode=ro` 打开一个 WAL 模式的 SQLite 库，
+它仍然会在人家目录里创建 `-shm` 和 `-wal` 两个伴生文件 —— 只读打开也会写。
+所以有 WAL 时先快照到临时目录再读，没有 WAL 时用 `immutable=1` 直读，两条路都不留痕迹。
 
 **索引体积**：跟你的会话总量成正比，量级参考「几百个会话 / 十几万条消息 → 数百 MB」。
 大头是 trigram 全文索引 —— 它给每个三字窗口建索引，这是中文子串搜索的代价

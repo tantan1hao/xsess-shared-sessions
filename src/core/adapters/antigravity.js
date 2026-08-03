@@ -24,6 +24,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { TOOLS, exists } from '../paths.js';
 import { cleanText, makeSession, toIso } from '../model.js';
 import { extractStrings, isNoise, dedupeStrings } from '../protobuf-walk.js';
+import { openReadOnlySafe } from '../sqlite-open.js';
 
 const TOOL = 'antigravity';
 const ROOT = TOOLS[TOOL].conversations;
@@ -242,10 +243,20 @@ function parseLegacyPb(src, nativeId, times) {
 
 // ---------------------------------------------------------------- 工具
 
+/**
+ * 只读打开，且不在 Antigravity 的目录里留下 -wal / -shm 垃圾文件。
+ * 细节见 sqlite-open.js —— `mode=ro` 只读打开也会写伴生文件，实测每次扫描留几十个。
+ */
 function openReadOnly(p) {
-  // mode=ro 而不是 immutable=1：Antigravity 开着的时候库在写 WAL，
-  // immutable 会读到撕裂的页面
-  return new DatabaseSync(`file:${encodeURI(p)}?mode=ro`, { readOnly: true });
+  const { db, removeFiles } = openReadOnlySafe(p, { sentinelTable: 'steps' });
+  // 让调用方照常 db.close()，顺手把临时快照清掉。
+  // removeFiles 不会反过来调 close —— 那样两边互相调用会直接爆栈。
+  const origClose = db.close.bind(db);
+  db.close = () => {
+    try { origClose(); } catch { /* 已关 */ }
+    removeFiles();
+  };
+  return db;
 }
 
 function statOf(p) {

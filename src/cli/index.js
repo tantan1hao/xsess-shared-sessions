@@ -42,7 +42,8 @@ ${c.bold('用法')}
 
 ${c.bold('接力')}
   xsess handoff <ID> [--to <工具>]         把某个会话压成交接包，喂给另一个工具继续做
-                                           --to claude-code|codex 会真的生成一个新会话文件
+                                           --to claude-code|codex|antigravity 生成真的新会话文件
+                                           写 antigravity 需要先完全退出它（会出现在它原生的会话列表里）
                                            不给 --to 就只打印/落盘，供你粘贴或 @ 引用
   xsess undo [--tool <名>] [--write]       删掉 xsess 创建过的会话文件（只删自己写的）
 
@@ -479,13 +480,16 @@ async function cmdHandoff(args) {
   if (!TIER_A.includes(args.to)) {
     process.stderr.write(
       c.red(`--to 只支持真能写回的工具：${TIER_A.join(' / ')}\n`) +
-        c.gray('Antigravity / Cursor 的库是 protobuf / 活跃 WAL，直写会损坏数据；\n') +
-        c.gray('它们走「注入式接力」——用不带 --to 的形式生成交接包，在 IDE 里 @ 引用那个文件。\n'),
+        c.gray('Cursor 的 state.vscdb 动辄几百 MB、运行时开着 WAL 在写，直写等于拿全部历史赌一把；\n') +
+        c.gray('它走「注入式接力」——用不带 --to 的形式生成交接包，在 IDE 里 @ 引用那个文件。\n'),
     );
     return 1;
   }
 
-  const result = await writeSession(args.to, pack, { write: !!args.write });
+  const result = await writeSession(args.to, pack, {
+    write: !!args.write,
+    allowWhileRunning: !!args.allowWhileRunning,
+  });
   if (!args.write) {
     process.stdout.write(c.yellow('预览（未写入）\n'));
     process.stdout.write(`  目标工具: ${toolName(args.to)}\n`);
@@ -772,7 +776,7 @@ function parseArgs(argv) {
   return args;
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'all', 'force', 'full', 'help', 'write']);
+const BOOLEAN_FLAGS = new Set(['json', 'all', 'force', 'full', 'help', 'write', 'allowWhileRunning']);
 const SHORT = { '-n': 'limit', '-h': 'help', '-t': 'tool', '-j': 'json', '-a': 'all' };
 
 function camel(s) {
