@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+
+# 本机真实会话的 ground truth 断言。内容是私人对话，不进仓库。
+# 模板见 tests/fixtures.local.example.json
+tests/fixtures.local.json

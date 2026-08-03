@@ -1,0 +1,83 @@
+{
+  "name": "xsess-sidebar",
+  "displayName": "xsess · 共享会话栏",
+  "description": "在侧边栏里看到 Claude Code / Codex / Antigravity / Cursor / Gemini CLI 的所有会话，并一键接续到当前 IDE",
+  "version": "0.1.0",
+  "publisher": "xsess",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "xsess",
+          "title": "共享会话",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "xsess": [
+        {
+          "id": "xsess.sessions",
+          "name": "跨工具会话",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "xsess.refresh",
+        "title": "xsess: 刷新会话列表",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "xsess.openHandoff",
+        "title": "xsess: 把某个会话接续到这里"
+      },
+      {
+        "command": "xsess.restartDaemon",
+        "title": "xsess: 重启本地服务"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "xsess.refresh",
+          "when": "view == xsess.sessions",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "xsess",
+      "properties": {
+        "xsess.daemonPort": {
+          "type": "number",
+          "default": 10180,
+          "description": "本地 xsess 服务端口"
+        },
+        "xsess.daemonEntry": {
+          "type": "string",
+          "default": "",
+          "description": "xsess-daemon.js 的绝对路径。留空则用安装时写入的 config.json"
+        },
+        "xsess.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "description": "侧边栏打开时，若本地服务没在跑则自动拉起"
+        },
+        "xsess.filterByWorkspace": {
+          "type": "boolean",
+          "default": false,
+          "description": "默认只显示当前工作区目录下的会话"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "xsess",
+  "version": "0.1.0",
+  "description": "跨 AI IDE 的共享会话栏 —— 把 Claude Code / Codex / Antigravity / Cursor / Trae / Kiro / Gemini CLI 的会话历史索引到一处，互相看得见、接得上",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "xsess": "bin/xsess.js",
+    "xsess-mcp": "bin/xsess-mcp.js",
+    "xsess-daemon": "bin/xsess-daemon.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --no-warnings --test tests/*.test.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "claude-code",
+    "codex",
+    "antigravity",
+    "cursor",
+    "gemini",
+    "sessions",
+    "handoff",
+    "mcp"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  }
+}
