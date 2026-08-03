@@ -18,6 +18,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { listSessions, searchSessions, getSession, getStats, rescan } from '../core/query.js';
 import { buildHandoff } from '../core/handoff.js';
+import { writeSession, TIER_A } from '../core/writers/index.js';
+import { renderUi } from './ui.js';
 import { ADAPTERS, UNSUPPORTED } from '../core/adapters/index.js';
 import { XSESS_HOME, ensureXsessDirs } from '../core/paths.js';
 
@@ -54,6 +56,18 @@ export function startDaemon({ port = DEFAULT_PORT, autoScan = true } = {}) {
 
     if (url.pathname === '/api/health') {
       return send(res, 200, { ok: true, name: 'xsess', port, pid: process.pid });
+    }
+
+    // 管理面板的页面壳子不需要鉴权：它本身不含任何会话数据，
+    // 数据全靠下面那些 /api/* 拿，而那些照样要 token。
+    if (url.pathname === '/' || url.pathname === '/ui') {
+      const html = renderUi();
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': Buffer.byteLength(html),
+        'cache-control': 'no-store',
+      });
+      return res.end(html);
     }
 
     if (!authorized(req, state.token)) {
@@ -109,6 +123,19 @@ async function route(req, res, url) {
       maxMessages: Math.min(parseInt(q.get('max') || '200', 10) || 200, 2000),
     });
     return s ? send(res, 200, s) : send(res, 404, { error: '找不到该会话' });
+  }
+
+  // 面板上的「接力到 X」按钮。只允许 Tier A 里那几个真能写回的工具。
+  if (p.startsWith('/api/handoff/') && p.endsWith('/write') && req.method === 'POST') {
+    const id = decodeURIComponent(p.slice('/api/handoff/'.length, -'/write'.length));
+    const to = q.get('to');
+    if (!TIER_A.includes(to)) {
+      return send(res, 400, { error: `不支持写回 ${to}（支持：${TIER_A.join(', ')}）` });
+    }
+    const pack = await buildHandoff(id);
+    if (!pack) return send(res, 404, { error: '找不到该会话' });
+    const result = await writeSession(to, pack, { write: true });
+    return send(res, 200, result);
   }
 
   if (p.startsWith('/api/handoff/') && req.method === 'GET') {

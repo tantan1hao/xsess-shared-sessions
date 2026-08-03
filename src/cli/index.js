@@ -47,6 +47,10 @@ ${c.bold('接力')}
                                            不给 --to 就只打印/落盘，供你粘贴或 @ 引用
   xsess undo [--tool <名>] [--write]       删掉 xsess 创建过的会话文件（只删自己写的）
 
+${c.bold('Web 管理面板')}
+  xsess ui                                 打开浏览器里的管理面板（会自动拉起 daemon）
+                                           搜索 / 按工具和项目筛选 / 看全文 / 一键接力
+
 ${c.bold('打通各家 IDE')}
   xsess mcp status | install | uninstall   注册 MCP 服务，让 Claude Code / Codex 自己查别家会话
                                            默认只预览，加 --write 才真正改配置（会先备份）
@@ -105,6 +109,8 @@ export async function main(argv) {
       return cmdDaemon(args);
     case 'ide':
       return cmdIde(args);
+    case 'ui':
+      return cmdUi(args);
     default:
       process.stderr.write(c.red(`未知命令: ${cmd}\n\n`) + HELP);
       return 1;
@@ -576,6 +582,53 @@ async function cmdMcp(args) {
 
   process.stderr.write(c.red(`未知子命令: ${sub}（可用 status / install / uninstall）\n`));
   return 1;
+}
+
+// ---------------------------------------------------------------- ui
+
+/**
+ * 打开 Web 管理面板。
+ *
+ * token 走 URL 的 fragment（`#token=…`）而不是查询串：
+ * fragment 不会发给服务端、不进 referer、不进任何服务端日志。
+ * 页面拿到后存进 sessionStorage 并把地址栏擦干净。
+ */
+async function cmdUi(args) {
+  const { startDaemon } = await import('../daemon/server.js');
+  const state = loadState();
+  const port = args.port ? parseInt(args.port, 10) : state.port || DEFAULT_PORT;
+
+  let alive = false;
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1500) });
+    alive = r.ok;
+  } catch {
+    /* 没起来，下面拉起 */
+  }
+
+  if (!alive) {
+    startDaemon({ port });
+    process.stdout.write(c.gray(`daemon 已启动 :${port}\n`));
+  }
+
+  const url = `http://127.0.0.1:${port}/#token=${state.token}`;
+  process.stdout.write(c.bold('xsess 管理面板\n') + `  ${url}\n\n`);
+
+  if (!args.noOpen) {
+    try {
+      const { execFile } = await import('node:child_process');
+      execFile('open', [url]);
+      process.stdout.write(c.gray('已在浏览器打开\n'));
+    } catch {
+      process.stdout.write(c.gray('自动打开失败，手动复制上面的地址\n'));
+    }
+  }
+
+  if (!alive) {
+    process.stdout.write(c.gray('\nCtrl-C 退出 daemon（面板会跟着失效）\n'));
+    return new Promise(() => {}); // 前台常驻，别让 daemon 跟着进程一起死
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------- ide
