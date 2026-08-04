@@ -177,7 +177,12 @@ test('演练写出的会话库通过全部自检，且不碰 Antigravity 的目�
       if (title) {
         const text = stringAt(Buffer.from(/** @type {Uint8Array} */ (title.step_payload)), [30, 4]);
         assert.equal(text, r.title, '标题步里存的必须是带前缀的新标题');
-        assert.ok(Number(title.idx) < steps.length - 1, '标题步不该在末尾');
+        // 判据是相对位置：紧跟第一条模型回复。
+        // 用「不在末尾」会把只有一问一答的会话误判成错误。
+        const firstModel = steps.findIndex((s) => Number(s.step_type) === STEP_MODEL);
+        if (firstModel >= 0) {
+          assert.equal(Number(title.idx), firstModel + 1, '标题步必须紧跟第一条模型回复');
+        }
       }
       // 首条必须是我们的交接抬头，不能是模板会话的内容
       const first = stringAt(Buffer.from(/** @type {Uint8Array} */ (steps[0].step_payload)), [19, 2]);

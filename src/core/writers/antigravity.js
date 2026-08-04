@@ -482,19 +482,26 @@ function verifyWritten(target, seq) {
       throw new Error(`gen_metadata 行数(${gen}) 和模型步数(${models}) 对不上 —— 打开会崩`);
     }
 
-    // 带 t23 的 40 个真实会话里，只有 1 个把它放在末尾
-    if (seq.some((s) => s.kind === 'title')) {
-      const t = db.prepare('SELECT idx FROM steps WHERE step_type=? ').all(STEP_TITLE);
-      if (t.length !== 1) throw new Error(`标题步应该有且只有 1 条，实际 ${t.length}`);
-      if (Number(t[0].idx) >= n - 1) throw new Error('标题步落在末尾，和真实会话的形状不符');
-    }
-
-    // 带 t98 的 20 个真实会话里，它**全部**在 idx=1
-    if (seq.some((s) => s.kind === 'init')) {
-      const i = db.prepare('SELECT idx FROM steps WHERE step_type=?').all(STEP_INIT);
-      if (i.length !== 1 || Number(i[0].idx) !== 1) {
-        throw new Error(`初始化步应该有且只有 1 条且位于 idx=1，实际 ${JSON.stringify(i.map((r) => Number(r.idx)))}`);
+    // 逐条比对写出来的 step_type 和计划的是否一字不差。
+    // 这一条把位置类的错误一网打尽 —— 标题步在哪、初始化步在哪，
+    // 都由 planSteps 说了算，这里只负责确认「写出来的 === 计划的」。
+    const TYPE_OF = { user: STEP_USER, model: STEP_MODEL, init: STEP_INIT, title: STEP_TITLE };
+    const rows = db.prepare('SELECT idx, step_type FROM steps ORDER BY idx').all();
+    rows.forEach((r, i) => {
+      const want = TYPE_OF[seq[i].kind];
+      if (Number(r.step_type) !== want) {
+        throw new Error(`第 ${i} 步类型不对：计划 ${seq[i].kind}(t${want})，实际 t${Number(r.step_type)}`);
       }
+    });
+
+    // 形状约束：标题步必须**紧跟第一条模型回复**。
+    // 真实会话里它几乎从不垫底（40 个里只有 1 个），但那是因为真实会话大多有多轮；
+    // 只有一问一答的会话，紧跟第一条回复本来就等于末尾。
+    // 所以判据是相对位置，不是「是否在末尾」—— 后者会把正常的单轮会话误判成错误。
+    const titleAt = seq.findIndex((s) => s.kind === 'title');
+    const firstModel = seq.findIndex((s) => s.kind === 'model');
+    if (titleAt >= 0 && firstModel >= 0 && titleAt !== firstModel + 1) {
+      throw new Error(`标题步位置不对：应在第 ${firstModel + 1} 步（首条模型回复之后），实际第 ${titleAt} 步`);
     }
   } finally {
     db.close();
