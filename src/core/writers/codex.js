@@ -13,7 +13,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { TOOLS, exists, prefixTitle } from '../paths.js';
 import { recordWrite } from './manifest.js';
-import { indexCodexThread, nameCodexThread } from './codex-index.js';
+import {
+  indexCodexThread,
+  nameCodexThread,
+  unindexCodexThread,
+  unnameCodexThread,
+} from './codex-index.js';
 
 const SESSIONS = TOOLS.codex.sessions;
 const FALLBACK_CLI_VERSION = '0.146.0-alpha.9.2';
@@ -118,7 +123,7 @@ export function writeCodexSession(pack, { write = false, origin = 'cli' } = {}) 
   fs.mkdirSync(dir, { recursive: true });
   if (exists(file)) throw new Error(`目标文件已存在，不覆盖：${file}`);
   fs.writeFileSync(file, content, 'utf8');
-  recordWrite({ tool: 'codex', path: file, sourceSession: pack.sessionId });
+  recordWrite({ tool: 'codex', path: file, targetId: id, sourceSession: pack.sessionId });
 
   // 光有文件还不够：codex resume 的列表读的是 state 库里的 threads 表，
   // 不登记的话文件写得再对也不会出现在列表里（实测过）。
@@ -153,6 +158,33 @@ export function writeCodexSession(pack, { write = false, origin = 'cli' } = {}) 
     result.nameWarning = named.reason;
   }
   return result;
+}
+
+/**
+ * 撤销一次写回：把三层索引一起摘干净。
+ *
+ * 少摘任何一层都会留下不一致的残骸 ——
+ * 只删文件的话，`codex resume` 的列表和桌面版侧边栏都还挂着这条，
+ * 点开是空的；只摘索引的话，孤儿文件会一直躺在 sessions/ 里。
+ *
+ * @param {{targetId:string, path:string}} target
+ * @param {{write?:boolean}} [opts]
+ */
+export function unwriteCodexSession(target, { write = false } = {}) {
+  const removed = [];
+  const { targetId, path: file } = target;
+
+  if (file && exists(file)) {
+    removed.push('会话文件');
+    if (write) fs.rmSync(file, { force: true });
+  }
+  if (targetId) {
+    const idx = unindexCodexThread(targetId, { write });
+    if (idx.removed || !write) removed.push('resume 列表');
+    const named = unnameCodexThread(targetId, { write });
+    if (named.removed || !write) removed.push('侧边栏索引');
+  }
+  return { tool: 'codex', targetId, path: file, removed };
 }
 
 /** `2026-08-03T17-35-47` —— 本地时间，跟 Codex 自己的命名一致 */

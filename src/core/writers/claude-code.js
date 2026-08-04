@@ -112,8 +112,24 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   if (exists(file)) throw new Error(`目标文件已存在，不覆盖：${file}`); // UUID 撞车，理论上不可能
   fs.writeFileSync(file, content, 'utf8');
-  recordWrite({ tool: 'claude-code', path: file, sourceSession: pack.sessionId });
+  recordWrite({ tool: 'claude-code', path: file, targetId: sessionId, sourceSession: pack.sessionId });
   return result;
+}
+
+/**
+ * 撤销一次写回。Claude Code 没有额外的索引 —— `claude --resume` 直接扫
+ * `~/.claude/projects/` 目录，所以删掉文件就干净了。
+ *
+ * @param {{targetId:string, path:string}} target
+ * @param {{write?:boolean}} [opts]
+ */
+export function unwriteClaudeCodeSession(target, { write = false } = {}) {
+  const removed = [];
+  if (target.path && exists(target.path)) {
+    removed.push('会话文件');
+    if (write) fs.rmSync(target.path, { force: true });
+  }
+  return { tool: 'claude-code', targetId: target.targetId, path: target.path, removed };
 }
 
 /** 从已有会话文件里读 Claude Code 版本号，保持写出来的记录跟本机一致 */

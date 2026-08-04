@@ -47,13 +47,15 @@ ${c.bold('接力')}
                                            不给 --to 就只打印/落盘，供你粘贴或 @ 引用
   xsess undo [--tool <名>] [--write]       删掉 xsess 创建过的会话文件（只删自己写的）
 
-放进 Antigravity 原生的会话栏
-  xsess sync                               看状态：已同步几条、有没有孤儿、它是否在跑
-  xsess sync check <ID>                    演练一遍验证结构（不碰它的文件，它开着也能跑）
-  xsess sync add <ID…> [--write]           把会话放进它的 Conversation History
-  xsess sync remove [<ID…>|--all] [--write] 撤回（连索引记录一起摘掉）
-                                           写入前必须完全退出 Antigravity（⌘Q）——
-                                           它把会话列表缓存在内存里，退出时会覆盖
+放进别家工具原生的会话栏（--to codex|antigravity|claude-code，默认 antigravity）
+  xsess sync [--to <工具>]                 看状态：已同步几条、有没有残骸、它是否在跑
+  xsess sync check <ID> [--to <工具>]      演练一遍（不碰目标的文件，它开着也能跑）
+  xsess sync add <ID…> [--to <工具>] [--write]      放进它的会话列表
+  xsess sync remove [<ID…>|--all|--orphans] [--write] 撤回，连索引记录一起摘掉
+                                           --orphans 只清残骸（索引里挂着、文件已不在的）
+                                           写 Antigravity 前必须完全退出它（⌘Q）——
+                                           它把会话列表缓存在内存里，退出时会覆盖；
+                                           Codex 不用退，但侧边栏要重启才刷新
 
 ${c.bold('Web 管理面板')}
   xsess ui                                 打开浏览器里的管理面板（会自动拉起 daemon）
@@ -562,47 +564,66 @@ async function cmdSync(args) {
   const to = args.to || 'antigravity';
   const sub = args._[1];
 
-  // xsess sync check <ID> —— 演练。生成到临时目录跑完整自检，
-  // 不碰目标工具的任何文件，所以它开着也能验证。
+  // xsess sync check <ID> —— 演练，不碰目标工具的任何文件，它开着也能验。
+  // Antigravity 会真的把会话库生成到临时目录跑完整结构自检（它的格式风险最高）；
+  // 其余工具走预览，报出将要创建什么。
   if (sub === 'check') {
     const key = args._[2];
     if (!key) {
-      process.stderr.write(c.red('要验哪个会话？用法：xsess sync check <ID>\n'));
+      process.stderr.write(c.red('要验哪个会话？用法：xsess sync check <ID> [--to <工具>]\n'));
       return 1;
     }
-    const os = await import('node:os');
-    const fsp = await import('node:fs');
-    const pathp = await import('node:path');
     const pack = await buildHandoff(key);
     if (!pack) {
       process.stderr.write(c.red(`找不到会话：${key}\n`));
       return 1;
     }
-    const { writeAntigravitySession } = await import('../core/writers/antigravity.js');
-    const dir = fsp.mkdtempSync(pathp.join(os.tmpdir(), 'xsess-check-'));
-    try {
-      const r = writeAntigravitySession(pack, { previewDir: dir });
-      const size = (fsp.statSync(r.path).size / 1024) | 0;
-      process.stdout.write(c.green('✓ ') + '结构自检通过\n');
+
+    if (to === 'antigravity') {
+      const os = await import('node:os');
+      const fsp = await import('node:fs');
+      const pathp = await import('node:path');
+      const { writeAntigravitySession } = await import('../core/writers/antigravity.js');
+      const dir = fsp.mkdtempSync(pathp.join(os.tmpdir(), 'xsess-check-'));
+      try {
+        const r = writeAntigravitySession(pack, { previewDir: dir });
+        const size = (fsp.statSync(r.path).size / 1024) | 0;
+        process.stdout.write(c.green('✓ ') + '结构自检通过\n');
+        process.stdout.write(`  标题:   ${r.title}\n`);
+        process.stdout.write(`  内容:   ${r.messageCount} 条消息，生成 ${size}KB\n`);
+        process.stdout.write(`  模板:   ${r.templateFrom}\n`);
+        process.stdout.write(`  工作区: ${r.templateWorkspace || '(未匹配)'}\n`);
+      } finally {
+        fsp.rmSync(dir, { recursive: true, force: true });
+      }
+    } else {
+      const { writeSession } = await import('../core/writers/index.js');
+      const r = await writeSession(to, pack, { write: false });
+      process.stdout.write(c.green('✓ ') + '可以写入\n');
       process.stdout.write(`  标题:   ${r.title}\n`);
-      process.stdout.write(`  内容:   ${r.messageCount} 条消息，生成 ${size}KB\n`);
-      process.stdout.write(`  模板:   ${r.templateFrom}\n`);
-      process.stdout.write(`  工作区: ${r.templateWorkspace || '(未匹配)'}\n`);
-      process.stdout.write(c.gray('\n演练不碰 Antigravity 的任何文件。真写用 xsess sync add <ID> --write\n'));
-    } finally {
-      fsp.rmSync(dir, { recursive: true, force: true });
+      process.stdout.write(`  内容:   ${r.messageCount} 条消息\n`);
+      process.stdout.write(`  将创建: ${shortPath(r.path)}\n`);
     }
+    process.stdout.write(
+      c.gray(`\n演练不碰 ${toolName(to)} 的任何文件。真写用 xsess sync add <ID> --to ${to} --write\n`),
+    );
     return 0;
   }
 
   // xsess sync remove [<ID>…] [--all]
   if (sub === 'remove' || sub === 'rm') {
     const ids = args._.slice(2);
-    if (!ids.length && !args.all) {
-      process.stderr.write(c.red('要撤哪些？给会话 ID，或用 --all 全撤。\n'));
+    if (!ids.length && !args.all && !args.orphans) {
+      process.stderr.write(
+        c.red('要撤哪些？给会话 ID，或用 --all 全撤，或用 --orphans 只清残骸。\n'),
+      );
       return 1;
     }
-    const r = await S.unsync(ids.length ? ids : null, { to, write: !!args.write });
+    const r = await S.unsync(ids.length ? ids : null, {
+      to,
+      write: !!args.write,
+      orphansOnly: !!args.orphans,
+    });
     if (!r.removed.length) {
       process.stdout.write(c.gray('没有可撤的记录。\n'));
       return 0;
@@ -611,7 +632,10 @@ async function cmdSync(args) {
       const tag = x.orphan ? c.yellow('孤儿') : c.gray('会话');
       process.stdout.write(`  ${args.write ? c.green('✓ 已撤') : c.yellow('将撤')} ${tag} ${x.targetId.slice(0, 8)} ${c.gray('← ' + x.sourceSession)}\n`);
     }
-    process.stdout.write(`\n  索引: 保留 ${r.keptRecords} 条 / 摘掉 ${r.droppedRecords} 条\n`);
+    // 只有 Antigravity 需要重拼它的会话列表，才有「保留/摘掉多少条」这个概念
+    if (r.droppedRecords || r.keptRecords) {
+      process.stdout.write(`\n  会话列表: 保留 ${r.keptRecords} 条 / 摘掉 ${r.droppedRecords} 条\n`);
+    }
     if (!args.write) process.stdout.write(c.yellow('\n这是预览。加 --write 才真的撤。\n'));
     return 0;
   }
@@ -641,17 +665,25 @@ async function cmdSync(args) {
     for (const x of r.failed) process.stdout.write(`  ${c.red('✗')} ${x.id} —— ${x.error}\n`);
     if (!args.write && r.synced.length) {
       process.stdout.write(c.yellow('\n这是预览。加 --write 才真的写入。\n'));
-      process.stdout.write(c.gray('注意：Antigravity 必须完全退出（⌘Q），否则它退出时会用内存里的列表覆盖掉。\n'));
+      if (to === 'antigravity') {
+        process.stdout.write(
+          c.gray('注意：Antigravity 必须完全退出（⌘Q），否则它退出时会用内存里的列表覆盖掉。\n'),
+        );
+      }
     } else if (args.write && r.synced.length) {
-      process.stdout.write(c.gray('\n打开 Antigravity，在 Conversation History 里就能看到。\n'));
+      process.stdout.write(c.gray('\n' + S.afterSyncHint(to) + '\n'));
     }
     return r.failed.length ? 1 : 0;
   }
 
   // 不带子命令 = 看状态
   const st = await S.syncStatus({ to });
-  process.stdout.write(`目标: ${toolName(to)}\n`);
-  process.stdout.write(`  正在运行: ${st.running ? c.yellow('是 —— 写入前必须完全退出（⌘Q）') : c.green('否，可以写入')}\n`);
+  process.stdout.write(`目标: ${toolName(to)}${c.gray('（--to 可选：' + st.targets.join(' / ') + '）')}\n`);
+  if (S.targetRunning(to) || to === 'antigravity') {
+    process.stdout.write(
+      `  正在运行: ${st.running ? c.yellow('是 —— 写入前必须完全退出（⌘Q）') : c.green('否，可以写入')}\n`,
+    );
+  }
   process.stdout.write(`  已同步:   ${st.syncedCount} 条\n`);
   for (const s of st.synced) {
     process.stdout.write(c.gray(`    ${s.targetId.slice(0, 8)} ← ${s.sourceSession}\n`));
@@ -664,12 +696,16 @@ async function cmdSync(args) {
     for (const o of st.orphans) {
       process.stdout.write(c.gray(`    ${o.targetId.slice(0, 8)} ← ${o.sourceSession}\n`));
     }
-    process.stdout.write(c.gray(`  清掉它们：xsess sync remove --all --write\n`));
+    process.stdout.write(
+      c.gray(`  清掉它们：xsess sync remove --orphans --to ${to} --write\n`),
+    );
   }
+  const suffix = to === 'antigravity' ? '' : ` --to ${to}`;
   process.stdout.write(
-    c.gray('\n  xsess sync check <ID>          演练一遍，验证结构（不碰 Antigravity）\n') +
-      c.gray('  xsess sync add <ID…> --write   放进它的原生会话栏\n'),
+    c.gray(`\n  xsess sync check <ID>${suffix}${' '.repeat(Math.max(1, 10 - suffix.length))}演练一遍，不碰 ${toolName(to)} 的文件\n`) +
+      c.gray(`  xsess sync add <ID…>${suffix} --write   放进它的原生会话栏\n`),
   );
+  if (st.hint) process.stdout.write(c.gray(`  ${st.hint}\n`));
   return 0;
 }
 

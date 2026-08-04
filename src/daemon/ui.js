@@ -143,7 +143,8 @@ export function renderUi() {
   <span class="sp"></span>
   <span id="selCount"></span>
   <button id="selAll">全选当前列表</button>
-  <button id="btnSync" class="primary">同步选中 → Antigravity</button>
+  <select id="syncTarget" title="同步到哪个工具的原生会话栏"></select>
+  <button id="btnSync" class="primary">同步选中</button>
   <button id="btnUnsync">取消同步</button>
 </div>
 
@@ -185,7 +186,8 @@ const NAMES = {
 let state = {
   q: '', tool: null, cwd: null, all: false,
   sessions: [], selected: null,
-  synced: new Set(),   // 已经出现在 Antigravity 原生会话栏里的
+  target: 'codex',     // 同步到哪个工具的原生会话栏
+  synced: new Set(),   // 已经出现在目标工具原生会话栏里的
   picked: new Set(),   // 当前勾选待同步的
   agRunning: false,
   orphans: 0,          // 索引里挂着、会话文件已不在的残留条目
@@ -325,9 +327,9 @@ async function openSession(id) {
       '<div class="facts">' + esc(facts.join(' · ')) + '<br>' + esc(s.id) + '</div>' +
       '<div class="acts">' +
         '<button class="primary" data-act="copy">复制交接包</button>' +
+        '<button data-act="to-codex">放进 Codex 会话栏</button>' +
         '<button data-act="to-antigravity">放进 Antigravity 会话栏</button>' +
         '<button data-act="to-claude-code">接力到 Claude Code</button>' +
-        '<button data-act="to-codex">接力到 Codex</button>' +
       '</div>' +
       s.messages.map((m) =>
         '<div class="msg ' + esc(m.role) + '">' +
@@ -372,22 +374,38 @@ function renderSelCount() {
 }
 
 async function loadSync() {
-  const st = await api('/api/sync');
+  const st = await api('/api/sync?to=' + encodeURIComponent(state.target));
   state.synced = new Set(st.synced.map((x) => x.sourceSession));
   state.agRunning = st.running;
   state.orphans = st.orphanCount || 0;
 
+  // 目标下拉只填一次，之后重刷不能动它 —— 否则会把用户刚选的选项重置掉
+  const sel = $('syncTarget');
+  if (!sel.options.length && Array.isArray(st.targets)) {
+    sel.innerHTML = st.targets
+      .map((t) => '<option value="' + t + '">→ ' + (NAMES[t] || t) + '</option>')
+      .join('');
+    sel.value = state.target;
+  }
+
+  const name = NAMES[state.target] || state.target;
   const orphanNote = state.orphans
     ? ' · <span class="warn">' + state.orphans + ' 条残留</span>' +
       '（会话文件已不在，在它列表里点开是空的 —— 用「取消同步」清掉）'
     : '';
   $('syncState').innerHTML = st.running
-    ? '<span class="warn">⚠ Antigravity 正在运行 —— 它退出时会覆盖写入的内容，' +
+    ? '<span class="warn">⚠ ' + name + ' 正在运行 —— 它退出时会覆盖写入的内容，' +
       '请先完全退出（⌘Q）再同步</span>' + orphanNote
-    : '已同步 <b>' + st.syncedCount + '</b> 条到 Antigravity 原生会话栏 · 它当前已退出，可以同步' +
-      orphanNote;
+    : '已同步 <b>' + st.syncedCount + '</b> 条到 ' + name + ' 原生会话栏' +
+      (st.hint ? ' · ' + esc(st.hint) : '') + orphanNote;
   renderSelCount();
 }
+
+$('syncTarget').onchange = async (e) => {
+  state.target = e.target.value;
+  await loadSync();
+  await loadList(); // 「已在会话栏」的标记是按目标算的，要跟着重画
+};
 
 $('selAll').onclick = () => {
   const ids = state.sessions.map((s) => s.id);
@@ -404,16 +422,16 @@ $('btnSync').onclick = async () => {
     const r = await api('/api/sync', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ids, to: 'antigravity', write: true }),
+      body: JSON.stringify({ ids, to: state.target, write: true }),
     });
     const bits = [r.synced.length + ' 条已写入'];
     if (r.skipped.length) bits.push(r.skipped.length + ' 条已存在');
     if (r.failed.length) bits.push(r.failed.length + ' 条失败');
-    toast(bits.join('，') + '。重开 Antigravity 就能看到');
+    toast(bits.join('，') + '。' + (NAMES[state.target] || state.target) + ' 里就能看到了');
     state.picked.clear();
     await loadSync(); await loadList();
   } catch (e) { toast('同步失败：' + e.message); }
-  finally { $('btnSync').disabled = false; $('btnSync').textContent = '同步选中 → Antigravity'; }
+  finally { $('btnSync').disabled = false; $('btnSync').textContent = '同步选中'; }
 };
 
 $('btnUnsync').onclick = async () => {
@@ -421,13 +439,14 @@ $('btnUnsync').onclick = async () => {
   const scope = picked.length ? picked : null;
   const total = state.synced.size + state.orphans;
   const label = picked.length ? ('选中的 ' + picked.length + ' 条') : ('全部 ' + total + ' 条');
-  if (!confirm('要把' + label + '从 Antigravity 的会话栏里撤掉吗？只删 xsess 写进去的，不碰你自己的会话。')) return;
+  const name = NAMES[state.target] || state.target;
+  if (!confirm('要把' + label + '从 ' + name + ' 的会话栏里撤掉吗？只删 xsess 写进去的，不碰你自己的会话。')) return;
   $('btnUnsync').disabled = true;
   try {
     const r = await api('/api/sync', {
       method: 'DELETE',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ids: scope, to: 'antigravity', write: true }),
+      body: JSON.stringify({ ids: scope, to: state.target, write: true }),
     });
     toast('已撤掉 ' + r.removed.length + ' 条');
     state.picked.clear();

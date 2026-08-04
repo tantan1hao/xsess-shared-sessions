@@ -15,9 +15,9 @@
  * 在 IDE 里 @ 引用那个文件 —— 对你来说同样是一键继续，但零损坏风险。
  */
 
-import { writeClaudeCodeSession } from './claude-code.js';
-import { writeCodexSession } from './codex.js';
-import { writeAntigravitySession } from './antigravity.js';
+import { writeClaudeCodeSession, unwriteClaudeCodeSession } from './claude-code.js';
+import { writeCodexSession, unwriteCodexSession } from './codex.js';
+import { writeAntigravitySession, unwriteAntigravitySession } from './antigravity.js';
 
 /**
  * 支持真·文件级写回的工具。
@@ -46,6 +46,31 @@ export async function writeSession(tool, pack, opts = {}) {
   const fn = WRITERS[tool];
   if (!fn) throw new Error(`不支持写回 ${tool}（支持的：${TIER_A.join(', ')}）`);
   return fn(pack, opts);
+}
+
+/**
+ * 撤销分派。
+ *
+ * 每家要清的东西不一样，差别不小 —— Claude Code 只有一个文件，
+ * Codex 有三层（会话文件 / resume 列表 / 桌面版侧边栏索引），
+ * Antigravity 要重拼它的会话列表。所以放在各自的 writer 里，
+ * 调用方只管说「把这条撤掉」。
+ */
+const UNWRITERS = {
+  'claude-code': unwriteClaudeCodeSession,
+  codex: unwriteCodexSession,
+  antigravity: unwriteAntigravitySession,
+};
+
+/**
+ * @param {string} tool
+ * @param {{targetId?:string, path?:string}} target 从写入清单里取的目标信息
+ * @param {{write?:boolean, allowWhileRunning?:boolean}} [opts]
+ */
+export async function unwriteSession(tool, target, opts = {}) {
+  const fn = UNWRITERS[tool];
+  if (!fn) throw new Error(`不支持撤销 ${tool}（支持的：${TIER_A.join(', ')}）`);
+  return fn(target, opts);
 }
 
 export { listWrites, revertWrites, MANIFEST_PATH } from './manifest.js';

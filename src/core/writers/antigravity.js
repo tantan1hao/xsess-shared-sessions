@@ -31,7 +31,14 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { TOOLS, BACKUP_DIR, ensureXsessDirs, exists, prefixTitle } from '../paths.js';
-import { replaceAt, stringAt, replaceUuidBytes, appendRecord, splitFields } from '../protobuf-edit.js';
+import {
+  replaceAt,
+  stringAt,
+  replaceUuidBytes,
+  appendRecord,
+  splitFields,
+  lenDelim,
+} from '../protobuf-edit.js';
 import { recordWrite } from './manifest.js';
 import { openReadOnlySafe } from '../sqlite-open.js';
 
@@ -139,7 +146,7 @@ export function writeAntigravitySession(pack, { write = false, allowWhileRunning
   buildConversationDb(template, pack, newCascadeId, target, title);
   appendSummary(template, newCascadeId, title);
 
-  recordWrite({ tool: 'antigravity', path: target, sourceSession: pack.sessionId });
+  recordWrite({ tool: 'antigravity', path: target, targetId: newCascadeId, sourceSession: pack.sessionId });
   recordWrite({
     tool: 'antigravity',
     path: SUMMARIES,
@@ -596,6 +603,68 @@ function appendSummary(template, newCascadeId, title) {
   }
 
   writeAtomic(SUMMARIES, next);
+}
+
+// ---------------------------------------------------------------- 撤销
+
+/**
+ * 撤销一次写回：删掉会话库，并把索引里对应的记录摘掉。
+ *
+ * 摘记录要重写整个 `agyhub_summaries_proto.pb`（追加能只加不改，删就不行了）。
+ * 但顶层是纯 repeated 字段、每条记录彼此独立，所以「删一条」在字节层面就是
+ * 把剩下的记录按原样重新拼起来 —— 不解析记录内部，也就不会改坏它们。
+ * 写之前照例备份 + 自检。
+ *
+ * @param {{targetId?:string, path?:string}} target
+ * @param {{write?:boolean, allowWhileRunning?:boolean}} [opts]
+ */
+export function unwriteAntigravitySession(target, { write = false, allowWhileRunning = false } = {}) {
+  const { targetId, path: dbPath } = target;
+  const removed = [];
+
+  if (write && !allowWhileRunning && isAntigravityRunning()) {
+    throw new Error('Antigravity 正在运行，先完全退出（⌘Q）再撤销。');
+  }
+
+  if (dbPath && exists(dbPath)) {
+    removed.push('会话文件');
+    if (write) cleanupDbFiles(dbPath);
+  }
+
+  const stats = { keptRecords: 0, droppedRecords: 0 };
+  if (targetId && exists(SUMMARIES)) {
+    const file = fs.readFileSync(SUMMARIES);
+    /** @type {Buffer[]} */
+    const kept = [];
+    for (const f of splitFields(file)) {
+      if (f.field !== 1) continue;
+      const body = file.subarray(f.valueStart, f.valueEnd);
+      if (stringAt(body, SUMMARY_ID) === targetId) {
+        stats.droppedRecords++;
+        continue;
+      }
+      kept.push(body);
+    }
+    stats.keptRecords = kept.length;
+
+    if (stats.droppedRecords) {
+      removed.push('会话列表条目');
+      if (write) {
+        backupSummaries();
+        const next = Buffer.concat(kept.map((b) => lenDelim(1, b)));
+        // 自检：重拼出来的文件必须能完整解析，且记录数对得上。
+        // 这个文件坏了整个会话历史面板就空了 —— 这一步不能省。
+        const check = splitFields(next).filter((x) => x.field === 1);
+        const covered = check.length ? check[check.length - 1].valueEnd : 0;
+        if (check.length !== kept.length || covered !== next.length) {
+          throw new Error('重拼的索引文件自检没过，已放弃写入（原文件未动）');
+        }
+        writeAtomic(SUMMARIES, next);
+      }
+    }
+  }
+
+  return { tool: 'antigravity', targetId, path: dbPath, removed, ...stats };
 }
 
 // ---------------------------------------------------------------- 工具
