@@ -188,6 +188,7 @@ let state = {
   synced: new Set(),   // 已经出现在 Antigravity 原生会话栏里的
   picked: new Set(),   // 当前勾选待同步的
   agRunning: false,
+  orphans: 0,          // 索引里挂着、会话文件已不在的残留条目
 };
 
 async function api(p, opts = {}) {
@@ -197,7 +198,13 @@ async function api(p, opts = {}) {
     headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + TOKEN },
   });
   if (r.status === 401) throw new Error('token 不对。用 \`xsess ui\` 重新打开这个页面。');
-  if (!r.ok) throw new Error(r.status + ' ' + (await r.text()));
+  if (!r.ok) {
+    // 服务端把原因写在 error 字段里，直接透出来 ——
+    // 只显示 "500" 的话用户根本不知道该做什么
+    let msg = r.status + '';
+    try { msg = (await r.json()).error || msg; } catch { msg = r.status + ' ' + (await r.text().catch(() => '')); }
+    throw new Error(msg);
+  }
   return r.json();
 }
 
@@ -359,17 +366,26 @@ function renderSelCount() {
   $('selCount').textContent = state.picked.size ? '已选 ' + state.picked.size + ' 条' : '';
   const busy = state.agRunning;
   $('btnSync').disabled = busy || !state.picked.size;
-  $('btnUnsync').disabled = busy || !state.synced.size;
+  // 孤儿也要能撤 —— 它们的 .db 已经没了，state.synced 里不算数，
+  // 但索引条目还挂在人家会话栏上，不给按钮就永远清不掉
+  $('btnUnsync').disabled = busy || (!state.synced.size && !state.orphans);
 }
 
 async function loadSync() {
   const st = await api('/api/sync');
   state.synced = new Set(st.synced.map((x) => x.sourceSession));
   state.agRunning = st.running;
+  state.orphans = st.orphanCount || 0;
+
+  const orphanNote = state.orphans
+    ? ' · <span class="warn">' + state.orphans + ' 条残留</span>' +
+      '（会话文件已不在，在它列表里点开是空的 —— 用「取消同步」清掉）'
+    : '';
   $('syncState').innerHTML = st.running
     ? '<span class="warn">⚠ Antigravity 正在运行 —— 它退出时会覆盖写入的内容，' +
-      '请先完全退出（⌘Q）再同步</span>'
-    : '已同步 <b>' + st.syncedCount + '</b> 条到 Antigravity 原生会话栏 · 它当前已退出，可以同步';
+      '请先完全退出（⌘Q）再同步</span>' + orphanNote
+    : '已同步 <b>' + st.syncedCount + '</b> 条到 Antigravity 原生会话栏 · 它当前已退出，可以同步' +
+      orphanNote;
   renderSelCount();
 }
 
@@ -403,7 +419,8 @@ $('btnSync').onclick = async () => {
 $('btnUnsync').onclick = async () => {
   const picked = [...state.picked].filter((i) => state.synced.has(i));
   const scope = picked.length ? picked : null;
-  const label = picked.length ? ('选中的 ' + picked.length + ' 条') : ('全部 ' + state.synced.size + ' 条');
+  const total = state.synced.size + state.orphans;
+  const label = picked.length ? ('选中的 ' + picked.length + ' 条') : ('全部 ' + total + ' 条');
   if (!confirm('要把' + label + '从 Antigravity 的会话栏里撤掉吗？只删 xsess 写进去的，不碰你自己的会话。')) return;
   $('btnUnsync').disabled = true;
   try {

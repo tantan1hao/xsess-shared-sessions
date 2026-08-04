@@ -29,9 +29,38 @@ export function syncedMap(targetTool = 'antigravity') {
   const map = new Map();
   for (const e of listWrites()) {
     if (e.tool !== targetTool || !e.sourceSession) continue;
-    if (e.kind === 'append') continue; // 索引追加记录，不是会话文件本身
+    if (e.kind === 'append' || e.kind === 'unsync') continue; // 不是会话文件本身
     if (!exists(e.path)) continue;
     map.set(e.sourceSession, { path: e.path, createdAt: e.createdAt, targetId: path.basename(e.path, '.db') });
+  }
+  return map;
+}
+
+/**
+ * 所有 xsess 往目标索引里追加过、且还没撤销的条目。
+ *
+ * 和 syncedMap 的关键区别：**不要求 .db 还在**。
+ * 实测过一次：写进去的会话被 Antigravity 清掉了，索引记录却留着 ——
+ * 只看 syncedMap 的话这种孤儿永远清不掉，会一直挂在人家的会话列表里，
+ * 点开是空的。撤销必须能处理它。
+ *
+ * @returns {Map<string, {sourceSession:string, dbPath:string, orphan:boolean}>} targetId → 信息
+ */
+export function appendedIndexEntries(targetTool = 'antigravity') {
+  const map = new Map();
+  for (const e of listWrites()) {
+    if (e.tool !== targetTool) continue;
+    if (e.kind === 'unsync' && e.appendedId) {
+      map.delete(e.appendedId);
+      continue;
+    }
+    if (e.kind !== 'append' || !e.appendedId) continue;
+    const dbPath = path.join(TOOLS[targetTool].conversations || '', `${e.appendedId}.db`);
+    map.set(e.appendedId, {
+      sourceSession: e.sourceSession,
+      dbPath,
+      orphan: !exists(dbPath), // 索引里有、会话文件没了
+    });
   }
   return map;
 }
@@ -104,17 +133,22 @@ export async function syncMany(ids, opts = {}) {
  * @param {string[]|null} sourceIds 要撤的源会话 ID；null = 全部
  */
 export async function unsync(sourceIds, { to = 'antigravity', write = false, allowWhileRunning = false } = {}) {
-  const synced = syncedMap(to);
-  const targets = [...synced.entries()].filter(([src]) => !sourceIds || sourceIds.includes(src));
+  // 用 appendedIndexEntries 而不是 syncedMap：前者不要求 .db 还在，
+  // 孤儿（索引里有条目、会话文件已被清掉）才能被撤干净
+  const indexed = appendedIndexEntries(to);
+  const targets = [...indexed.entries()].filter(
+    ([, v]) => !sourceIds || (v.sourceSession && sourceIds.includes(v.sourceSession)),
+  );
 
-  const result = { removed: [], keptRecords: 0, droppedRecords: 0 };
+  const result = { removed: [], keptRecords: 0, droppedRecords: 0, orphans: 0 };
   if (!targets.length) return result;
+  result.orphans = targets.filter(([, v]) => v.orphan).length;
 
   if (write && !allowWhileRunning && targetRunning(to)) {
     throw new Error(`${to} 正在运行，先完全退出再撤销。`);
   }
 
-  const targetIds = new Set(targets.map(([, v]) => v.targetId));
+  const targetIds = new Set(targets.map(([id]) => id));
 
   if (to === 'antigravity' && exists(SUMMARIES)) {
     const file = fs.readFileSync(SUMMARIES);
@@ -146,17 +180,29 @@ export async function unsync(sourceIds, { to = 'antigravity', write = false, all
     }
   }
 
-  for (const [src, info] of targets) {
-    result.removed.push({ sourceSession: src, path: info.path, targetId: info.targetId });
+  for (const [targetId, info] of targets) {
+    result.removed.push({
+      sourceSession: info.sourceSession,
+      path: info.dbPath,
+      targetId,
+      orphan: info.orphan,
+    });
     if (write) {
       for (const ext of ['', '-wal', '-shm']) {
         try {
-          fs.rmSync(info.path + ext, { force: true });
+          fs.rmSync(info.dbPath + ext, { force: true });
         } catch {
           /* 忽略 */
         }
       }
-      recordWrite({ tool: to, path: info.path, kind: 'unsync', sourceSession: src });
+      // appendedId 必须记上：撤销记录靠它和当初的追加记录对上号
+      recordWrite({
+        tool: to,
+        path: info.dbPath,
+        kind: 'unsync',
+        appendedId: targetId,
+        sourceSession: info.sourceSession,
+      });
     }
   }
   return result;
@@ -165,11 +211,17 @@ export async function unsync(sourceIds, { to = 'antigravity', write = false, all
 /** 面板要展示的整体状态 */
 export async function syncStatus({ to = 'antigravity' } = {}) {
   const synced = syncedMap(to);
+  // 孤儿会让目标的会话列表里挂着点不开的条目，面板要能提示用户清掉
+  const orphans = [...appendedIndexEntries(to).entries()]
+    .filter(([, v]) => v.orphan)
+    .map(([targetId, v]) => ({ targetId, sourceSession: v.sourceSession }));
   return {
     target: to,
     running: targetRunning(to),
     syncedCount: synced.size,
     synced: [...synced.entries()].map(([sourceSession, v]) => ({ sourceSession, ...v })),
+    orphanCount: orphans.length,
+    orphans,
   };
 }
 

@@ -53,6 +53,12 @@ const MODEL_TEXT_DUP = [20, 8];
 const STEP_USER = 14;
 const STEP_MODEL = 15;
 const STEP_TITLE = 23;
+/**
+ * 会话初始化步。真实会话里 20/41 带它，且**全部固定在 idx=1**
+ * （紧跟第一条用户消息）。payload 只有 200 来字节的元数据信封，没有正文。
+ * 不补这一条，会话的开头结构和 Antigravity 自己写的对不上。
+ */
+const STEP_INIT = 98;
 /** 标题步骤里存标题的路径 */
 const TITLE_TEXT = [30, 4];
 /**
@@ -68,14 +74,27 @@ export function antigravityAvailable() {
 
 /**
  * @param {import('../handoff.js').HandoffPack} pack
- * @param {{write?:boolean, allowWhileRunning?:boolean}} [opts]
+ * @param {{write?:boolean, allowWhileRunning?:boolean, previewDir?:string|null}} [opts]
  *   allowWhileRunning：明知 Antigravity 在跑也要写。
  *   留这个口子有两个用途：进程检测万一误判时的逃生口，以及沙箱测试。
  *   正常路径下别用 —— 追加的内容很可能被 Antigravity 退出时的缓存覆盖掉。
+ *
+ *   previewDir：把会话库整个生成到指定目录做**结构演练**，不碰 Antigravity 的
+ *   任何文件、不追加索引、不记清单。这是崩过一次之后补的：会话结构对不对，
+ *   必须能在写进去之前就验证，而不是等用户点开才知道。
  */
-export function writeAntigravitySession(pack, { write = false, allowWhileRunning = false } = {}) {
-  if (!antigravityAvailable()) {
-    throw new Error(`找不到 Antigravity 的数据目录（${AG_ROOT}）`);
+export function writeAntigravitySession(pack, { write = false, allowWhileRunning = false, previewDir = null } = {}) {
+  if (!exists(CONVERSATIONS)) {
+    throw new Error(`找不到 Antigravity 的会话目录（${CONVERSATIONS}）`);
+  }
+  if (!exists(SUMMARIES)) {
+    // 这个索引文件是 Antigravity 自己管的，它会在某些时刻重建。
+    // 文件不在的时候不能凭空造一个 —— 我们没有它的完整 schema，
+    // 造出来的很可能让 Antigravity 打不开甚至崩掉。
+    throw new Error(
+      `Antigravity 的会话索引 ${path.basename(SUMMARIES)} 当前不存在，无法安全写入。\n` +
+        '它由 Antigravity 自己维护：正常用一会儿（新建/打开几个会话）让它重建出来，再试。',
+    );
   }
 
   const template = pickTemplate(pack.cwd);
@@ -85,7 +104,7 @@ export function writeAntigravitySession(pack, { write = false, allowWhileRunning
 
   const newCascadeId = randomUUID();
   const title = prefixTitle(pack.tool, pack.title);
-  const target = path.join(CONVERSATIONS, `${newCascadeId}.db`);
+  const target = path.join(previewDir || CONVERSATIONS, `${newCascadeId}.db`);
 
   const result = {
     tool: 'antigravity',
@@ -98,6 +117,14 @@ export function writeAntigravitySession(pack, { write = false, allowWhileRunning
     summariesFile: SUMMARIES,
     resumeHint: '在 Antigravity 的 Conversation History 里打开',
   };
+
+  // 演练：只生成会话库本身（带完整自检），Antigravity 的目录一个字节都不动。
+  // 它在跑也没关系 —— 我们根本不碰它的文件。
+  if (previewDir) {
+    fs.mkdirSync(previewDir, { recursive: true });
+    buildConversationDb(template, pack, newCascadeId, target, title);
+    return { ...result, preview: true };
+  }
 
   if (!write) return result;
 
@@ -125,8 +152,17 @@ export function writeAntigravitySession(pack, { write = false, allowWhileRunning
 
 // ---------------------------------------------------------------- 选模板
 
+/** 模板体积上限。模板会被整个复制一份再清空，太大纯属浪费磁盘和时间 */
+const MAX_TEMPLATE_BYTES = 8 * 1024 * 1024;
+
 /**
- * 挑一条又有 summary 记录、又有可用 .db 的会话当模板。
+ * 挑一条又有 summary 记录、又有**结构真能用**的 .db 当模板。
+ *
+ * 「结构真能用」这几个字是踩坑换来的。上一版只数了各 step_type 的行数，
+ * 于是挑中了一个 t23 存在、但它的 `[30,4]` 字段根本不存在的会话
+ * （标题步有两种形态：模型另起的标题走 30.4，直接拿首条消息当标题的只有 30.19）。
+ * 结果 titleStep 被判成 null，标题步整个没写进去。
+ * 所以这里的判定必须和真正取模板时用的是同一个函数。
  *
  * 优先挑**同一个工作区**的：Projects 面板是按工作区 URI 分组的，
  * 而那个 URI 埋在好几层嵌套结构里、长度还不一样，替换它要重算多层长度前缀，
@@ -146,43 +182,58 @@ function pickTemplate(cwd) {
     const summaryTitle = stringAt(body, SUMMARY_TITLE);
     if (!id || !summaryTitle) continue;
     const dbPath = path.join(CONVERSATIONS, `${id}.db`);
-    if (!exists(dbPath)) continue;
-    if (!hasUsableSteps(dbPath)) continue;
+    let size = 0;
+    try {
+      size = fs.statSync(dbPath).size;
+    } catch {
+      continue; // .db 不在
+    }
+    if (size > MAX_TEMPLATE_BYTES) continue;
 
     const workspace = stringAt(body, SUMMARY_WORKSPACE);
-    candidates.push({ id, summaryTitle, body, dbPath, workspace });
+    candidates.push({
+      id,
+      summaryTitle,
+      body,
+      dbPath,
+      workspace,
+      size,
+      sameProject: !!(wantUri && workspace && workspace.startsWith(wantUri)),
+    });
   }
-  if (!candidates.length) return null;
 
-  if (wantUri) {
-    const sameProject = candidates.find((c) => c.workspace && c.workspace.startsWith(wantUri));
-    if (sameProject) return sameProject;
+  // 先排序再逐个开库验证 —— 开库是这里最贵的操作，排在前面的先试，
+  // 命中就不用再碰后面的了。同工作区 > 体积小（复制快、VACUUM 快）
+  candidates.sort((a, b) => Number(b.sameProject) - Number(a.sameProject) || a.size - b.size);
+
+  /** @type {any} */
+  let fallback = null;
+  for (const c of candidates) {
+    const facts = templateFacts(c.dbPath);
+    if (!facts) continue;
+    if (!facts.user || !facts.model || !facts.title) continue;
+    // t98 只有一半会话带，不是硬性要求；但带着的结构更完整，优先用
+    if (facts.init) return c;
+    if (!fallback) fallback = c;
   }
-  // 退而求其次：步数最多的那条，模板结构最全
-  return candidates.sort((a, b) => stepCount(b.dbPath) - stepCount(a.dbPath))[0];
+  return fallback;
 }
 
-function hasUsableSteps(dbPath) {
+/**
+ * 模板库里到底有哪些能用的样板。判定用的就是后面真正取模板的那两个函数，
+ * 保证「筛选说能用」和「实际取得到」永远一致。
+ */
+function templateFacts(dbPath) {
   const db = openRo(dbPath);
   try {
-    const u = db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_USER);
-    const m = db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_MODEL);
-    // 标题步骤也必须有：没有它，Antigravity 会拿第一条消息当标题
-    const t = db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_TITLE);
-    return Number(u.c) > 0 && Number(m.c) > 0 && Number(t.c) > 0;
+    return {
+      user: !!pickStepWithText(db, STEP_USER, USER_TEXT),
+      model: !!pickStepWithText(db, STEP_MODEL, MODEL_TEXT),
+      title: !!pickStepWithText(db, STEP_TITLE, TITLE_TEXT),
+      init: !!firstStepOfType(db, STEP_INIT),
+    };
   } catch {
-    return false;
-  } finally {
-    db.close();
-  }
-}
-
-function stepCount(dbPath) {
-  const db = openRo(dbPath);
-  try {
-    return Number(db.prepare('SELECT count(*) c FROM steps').get().c);
-  } catch {
-    return 0;
+    return null;
   } finally {
     db.close();
   }
@@ -191,14 +242,17 @@ function stepCount(dbPath) {
 // ---------------------------------------------------------------- 建会话库
 
 function buildConversationDb(template, pack, newCascadeId, target, title) {
-  // 从模板库里取两种 step 的样板
+  // 从模板库里取各种 step 的样板，以及模型轮次要配的元数据行
   const src = openRo(template.dbPath);
-  let userStep, modelStep, titleStep, meta;
+  let userStep, modelStep, titleStep, initStep, meta, genRow, execRow;
   try {
     meta = src.prepare('SELECT * FROM trajectory_meta LIMIT 1').get();
     userStep = pickStepWithText(src, STEP_USER, USER_TEXT);
     modelStep = pickStepWithText(src, STEP_MODEL, MODEL_TEXT);
     titleStep = pickStepWithText(src, STEP_TITLE, TITLE_TEXT);
+    initStep = firstStepOfType(src, STEP_INIT);
+    genRow = smallestBlobRow(src, 'gen_metadata');
+    execRow = smallestBlobRow(src, 'executor_metadata');
   } finally {
     src.close();
   }
@@ -211,6 +265,10 @@ function buildConversationDb(template, pack, newCascadeId, target, title) {
     [String(meta.trajectory_id), newTrajectoryId],
   ]);
 
+  // 第一条：交接抬头。这样即使后面的渲染有出入，打开也能看到完整来龙去脉
+  const turns = turnsOf(pack);
+  const seq = planSteps(turns, { initStep, titleStep });
+
   // 先按模板文件复制一份，schema 和索引就都对了
   fs.copyFileSync(template.dbPath, target);
 
@@ -221,7 +279,8 @@ function buildConversationDb(template, pack, newCascadeId, target, title) {
       newTrajectoryId,
       newCascadeId,
     );
-    // 这些是模型生成过程的元数据，指向旧会话，留着没意义
+    // 先清空，下面按新会话重建。gen_metadata / executor_metadata 不是清完就算，
+    // 它们和 steps 有数量约束，见下面重建那段。
     for (const t of ['steps', 'gen_metadata', 'executor_metadata', 'parent_references', 'battle_mode_infos']) {
       try {
         db.exec(`DELETE FROM "${t}"`);
@@ -250,22 +309,29 @@ function buildConversationDb(template, pack, newCascadeId, target, title) {
        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
     );
 
-    // 第一条：交接抬头。这样即使后面的渲染有出入，打开也能看到完整来龙去脉
-    const turns = turnsOf(pack);
+    seq.forEach((item, idx) => {
+      const tpl = { user: userStep, model: modelStep, init: initStep, title: titleStep }[item.kind];
+      let payload = remapUuids(Buffer.from(tpl.step_payload), uuidMap);
 
-    turns.forEach((turn, idx) => {
-      const isUser = turn.role === 'user';
-      const tpl = isUser ? userStep : modelStep;
-      const payload = substituteText(Buffer.from(tpl.step_payload), isUser, turn.text, uuidMap);
-      // metadata 列和 payload 的字段 5 是同一份信封，要一起换 UUID
-      const metaBlob = tpl.metadata ? remapUuids(Buffer.from(tpl.metadata), uuidMap) : null;
+      if (item.kind === 'user' || item.kind === 'model') {
+        payload = substituteText(payload, item.kind === 'user', item.text, uuidMap);
+      } else if (item.kind === 'title') {
+        payload = replaceAt(payload, TITLE_TEXT, title);
+        // 连带把「生成标题所依据的那条原始消息」换成我们自己的首条消息，
+        // 否则模板会话的正文会从这里漏出去
+        if (stringAt(payload, TITLE_SOURCE_TEXT) != null) {
+          payload = replaceAt(payload, TITLE_SOURCE_TEXT, turns[0]?.text ?? title);
+        }
+      }
+      // init 步没有正文，只有元数据信封 —— 换完 UUID 直接用
 
       insert.run(
         idx,
         tpl.step_type,
         tpl.status,
         tpl.has_subtrajectory,
-        metaBlob,
+        // metadata 列和 payload 的字段 5 是同一份信封，要一起换 UUID
+        tpl.metadata ? remapUuids(Buffer.from(tpl.metadata), uuidMap) : null,
         null,
         null,
         null,
@@ -275,30 +341,23 @@ function buildConversationDb(template, pack, newCascadeId, target, title) {
       );
     });
 
-    // 补一条标题步骤（step_type=23）。
-    // 不补的话 Antigravity 找不到标题，会拿第一条消息的完整原文当标题 ——
-    // 实测就是这样：写进去的「cc：OCR运行时集成审查」重启后变成了整段交接抬头。
-    // 40/42 个真实会话都带这个步骤，它才是 Antigravity 认的标题来源。
-    if (titleStep) {
-      let p = replaceAt(remapUuids(Buffer.from(titleStep.step_payload), uuidMap), TITLE_TEXT, title);
-      // 连带把「生成标题所依据的那条原始消息」换成我们自己的首条消息，
-      // 否则模板会话的正文会从这里漏出去
-      if (stringAt(p, TITLE_SOURCE_TEXT) != null) {
-        p = replaceAt(p, TITLE_SOURCE_TEXT, turns[0]?.text ?? title);
-      }
-      insert.run(
-        turns.length,
-        titleStep.step_type,
-        titleStep.status,
-        titleStep.has_subtrajectory,
-        titleStep.metadata ? remapUuids(Buffer.from(titleStep.metadata), uuidMap) : null,
-        null,
-        null,
-        null,
-        titleStep.render_info ? remapUuids(Buffer.from(titleStep.render_info), uuidMap) : null,
-        p,
-        titleStep.step_format,
-      );
+    // 每个模型轮次配一条 gen_metadata。
+    // 这是硬约束，不是可选装饰：41 个真实会话里 32 个满足
+    // 「gen_metadata 行数 === step_type=15 数量」，且它的 idx 是**模型轮次序号**
+    // （0,1,2…），不是 step 的 idx。上一版把这张表整个 DELETE 掉却照样插入了
+    // N 条模型步 —— Antigravity 渲染第 i 轮时按 idx 去查，查空。
+    // 现象就是打开会话后崩溃、.db 被清掉。
+    const modelCount = seq.filter((s) => s.kind === 'model').length;
+    if (genRow && modelCount) {
+      const data = remapUuids(Buffer.from(/** @type {Uint8Array} */ (genRow.data)), uuidMap);
+      const g = db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (?,?,?)');
+      for (let i = 0; i < modelCount; i++) g.run(i, new Uint8Array(data), data.length);
+    }
+    // executor_metadata 和模型轮次**不是**一一对应（实测 9 轮只有 3 条），
+    // 所以按序号查它的可能性低 —— 保守只留模板的第一条，够结构完整即可。
+    if (execRow) {
+      const data = remapUuids(Buffer.from(/** @type {Uint8Array} */ (execRow.data)), uuidMap);
+      db.prepare('INSERT INTO executor_metadata (idx, data) VALUES (?,?)').run(0, new Uint8Array(data));
     }
 
     db.exec('COMMIT');
@@ -326,8 +385,8 @@ function buildConversationDb(template, pack, newCascadeId, target, title) {
   }
 
   // 写完自己解一遍。写出一个打不开的会话，比不写更糟 ——
-  // 它会出现在列表里，点开是空的，而且你不知道是哪一步错了。
-  verifyWritten(target, turnsOf(pack).length, !!titleStep);
+  // 它会出现在列表里，点开可能直接让 Antigravity 崩掉（实测过一次）。
+  verifyWritten(target, seq);
 }
 
 /** 交接抬头 + 原始轮次 */
@@ -335,23 +394,107 @@ function turnsOf(pack) {
   return [{ role: 'user', text: pack.header }, ...pack.turns];
 }
 
-function verifyWritten(target, turnCount, hasTitleStep) {
+/**
+ * 排 steps 的顺序，照着真实会话的形状来：
+ *
+ *   idx0 t14(用户)  idx1 t98(初始化)  idx2 t15(模型)  idx3 t23(标题)  之后交替…
+ *
+ * 两个位置是实测定下来的，不是随手放的：
+ *   - t98 在 20 个带它的会话里**全部**位于 idx=1
+ *   - t23 在 40 个带它的会话里只有 1 个在末尾，其余都落在 idx 2–7，
+ *     也就是「第一个模型回复之后」。上一版把它追加到最后，位置是错的。
+ *
+ * @param {{role:string,text:string}[]} turns
+ * @param {{initStep:any, titleStep:any}} tpl
+ */
+export function planSteps(turns, { initStep, titleStep }) {
+  /** @type {{kind:'user'|'model'|'init'|'title', text?:string}[]} */
+  const seq = [];
+  turns.forEach((turn, i) => {
+    seq.push({ kind: turn.role === 'user' ? 'user' : 'model', text: turn.text });
+    if (i === 0 && initStep) seq.push({ kind: 'init' });
+  });
+  if (titleStep) {
+    const firstModel = seq.findIndex((s) => s.kind === 'model');
+    seq.splice(firstModel >= 0 ? firstModel + 1 : seq.length, 0, { kind: 'title' });
+  }
+  return seq;
+}
+
+/** 取某个 step_type 的第一条（用于没有正文、只有信封的步骤） */
+function firstStepOfType(db, stepType) {
+  try {
+    return db.prepare('SELECT * FROM steps WHERE step_type=? ORDER BY idx LIMIT 1').get(stepType) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 取某张 blob 表里**最小的**那行当样板。
+ * gen_metadata 单行能到 138KB（里面是整套工具定义），挑最小的那条既够
+ * 结构完整，又不会让每条同步过去的会话都膨胀上百 KB。
+ */
+function smallestBlobRow(db, table) {
+  try {
+    const row = db
+      .prepare(`SELECT idx, data FROM "${table}" WHERE data IS NOT NULL ORDER BY length(data) LIMIT 1`)
+      .get();
+    return row && row.data ? row : null;
+  } catch {
+    return null; // 表不存在
+  }
+}
+
+/**
+ * 写完立刻按**从真实会话统计出来的不变量**自检一遍。
+ *
+ * 这一版比上一版严得多，是有代价换来的：上一版只数了 steps 行数就放行，
+ * 结果写出来的会话结构不完整，Antigravity 打开时崩了、.db 被清掉。
+ * 下面每条断言都对应一个实测规律，注释里写了样本数。
+ *
+ * @param {string} target
+ * @param {{kind:string}[]} seq 计划写入的步骤序列
+ */
+function verifyWritten(target, seq) {
   const db = openRo(target);
   try {
-    const expected = turnCount + (hasTitleStep ? 1 : 0);
-    const n = Number(db.prepare('SELECT count(*) c FROM steps').get().c);
-    if (n !== expected) {
-      throw new Error(`写出来的会话步骤数不对：期望 ${expected}，实际 ${n}`);
+    const q = (sql, ...args) => Number(db.prepare(sql).get(...args).c);
+
+    const n = q('SELECT count(*) c FROM steps');
+    if (n !== seq.length) throw new Error(`步骤数不对：期望 ${seq.length}，实际 ${n}`);
+
+    const empty = q(
+      'SELECT count(*) c FROM steps WHERE step_payload IS NULL OR length(step_payload) < 32',
+    );
+    if (empty > 0) throw new Error(`有 ${empty} 条步骤的 payload 是空的`);
+
+    // idx 必须是 0..n-1 连续无洞 —— Antigravity 按序号取步骤
+    const gaps = q('SELECT count(*) c FROM steps WHERE idx < 0 OR idx >= ?', n);
+    if (gaps > 0 || q('SELECT count(DISTINCT idx) c FROM steps') !== n) {
+      throw new Error('steps 的 idx 不是 0..n-1 的连续序列');
     }
-    if (hasTitleStep) {
-      const t = Number(db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_TITLE).c);
-      if (t !== 1) throw new Error('标题步骤没写进去，Antigravity 会拿首条消息当标题');
+
+    // 41 个真实会话中 32 个满足：gen_metadata 行数 === step_type=15 数量
+    const models = q('SELECT count(*) c FROM steps WHERE step_type=?', STEP_MODEL);
+    const gen = q('SELECT count(*) c FROM gen_metadata');
+    if (gen !== models) {
+      throw new Error(`gen_metadata 行数(${gen}) 和模型步数(${models}) 对不上 —— 打开会崩`);
     }
-    const empty = db
-      .prepare('SELECT count(*) c FROM steps WHERE step_payload IS NULL OR length(step_payload) < 32')
-      .get();
-    if (Number(empty.c) > 0) {
-      throw new Error(`有 ${empty.c} 条步骤的 payload 是空的`);
+
+    // 带 t23 的 40 个真实会话里，只有 1 个把它放在末尾
+    if (seq.some((s) => s.kind === 'title')) {
+      const t = db.prepare('SELECT idx FROM steps WHERE step_type=? ').all(STEP_TITLE);
+      if (t.length !== 1) throw new Error(`标题步应该有且只有 1 条，实际 ${t.length}`);
+      if (Number(t[0].idx) >= n - 1) throw new Error('标题步落在末尾，和真实会话的形状不符');
+    }
+
+    // 带 t98 的 20 个真实会话里，它**全部**在 idx=1
+    if (seq.some((s) => s.kind === 'init')) {
+      const i = db.prepare('SELECT idx FROM steps WHERE step_type=?').all(STEP_INIT);
+      if (i.length !== 1 || Number(i[0].idx) !== 1) {
+        throw new Error(`初始化步应该有且只有 1 条且位于 idx=1，实际 ${JSON.stringify(i.map((r) => Number(r.idx)))}`);
+      }
     }
   } finally {
     db.close();

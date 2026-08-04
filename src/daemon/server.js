@@ -78,7 +78,12 @@ export function startDaemon({ port = DEFAULT_PORT, autoScan = true } = {}) {
     try {
       await route(req, res, url);
     } catch (e) {
-      send(res, 500, { error: e.message });
+      // 可预期的前置条件失败（目标应用在跑、数据目录不在、不支持的工具）
+      // 应该是 4xx —— 面板只拿到 500 的话，用户看不出该做什么。
+      const msg = String(e.message || e);
+      const expected =
+        /正在运行|找不到|不支持|已放弃|没给|过大|不是合法/.test(msg) ? 409 : 500;
+      send(res, expected, { error: msg });
     }
   });
 
