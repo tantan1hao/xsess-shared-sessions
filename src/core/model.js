@@ -132,7 +132,13 @@ export function deriveTitle(messages, fallback = '(无标题)') {
   for (const m of messages) {
     if (m.role !== 'user' || !m.text) continue;
     const stripped = stripInjectedPreamble(m.text);
-    if (stripped) return oneLine(stripped);
+    if (!stripped) continue;
+    // xsess 自己接力过去的会话：抬头首行就是标题（`⟨接力⟩cc：原标题`），
+    // 后面几行是来源说明和上下文摘要。不单独取首行的话，
+    // oneLine 会把整段抬头压成一条又长又乱的标题。
+    const first = stripped.split('\n', 1)[0];
+    const handoff = /^⟨接力⟩\s*(.+)$/.exec(first);
+    return oneLine(handoff ? handoff[1] : stripped);
   }
   const firstAny = messages.find((m) => m.text && m.text.trim());
   if (firstAny) return oneLine(stripInjectedPreamble(firstAny.text) || firstAny.text);
