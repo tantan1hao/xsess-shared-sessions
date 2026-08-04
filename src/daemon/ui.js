@@ -106,6 +106,23 @@ export function renderUi() {
   }
   .empty { color: var(--dim); padding: 40px 20px; text-align: center; line-height: 1.9; }
   .err { color: var(--danger); padding: 20px; white-space: pre-wrap; }
+  #bar {
+    display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+    border-bottom: 1px solid var(--line); font-size: 12.5px; flex: none;
+    background: var(--card);
+  }
+  #bar .sp { flex: 1; }
+  #bar .warn { color: #b45309; }
+  @media (prefers-color-scheme: dark) { #bar .warn { color: #fbbf24; } }
+  .item { display: flex; gap: 9px; align-items: flex-start; }
+  .item .cb { margin-top: 3px; flex: none; }
+  .item .col { min-width: 0; flex: 1; }
+  .badge {
+    font-size: 10px; padding: 1px 5px; border-radius: 4px; margin-left: 6px;
+    background: #10b98122; color: #059669; border: 1px solid #10b98155;
+    white-space: nowrap;
+  }
+  @media (prefers-color-scheme: dark) { .badge { color: #34d399; } }
   #toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     background: var(--fg); color: var(--bg); padding: 9px 16px; border-radius: 8px;
@@ -120,6 +137,15 @@ export function renderUi() {
   <input id="q" type="search" placeholder="搜索所有工具的会话…（中文可用）">
   <button id="rescan">重新扫描</button>
 </header>
+
+<div id="bar">
+  <span id="syncState">同步状态加载中…</span>
+  <span class="sp"></span>
+  <span id="selCount"></span>
+  <button id="selAll">全选当前列表</button>
+  <button id="btnSync" class="primary">同步选中 → Antigravity</button>
+  <button id="btnUnsync">取消同步</button>
+</div>
 
 <main>
   <aside>
@@ -156,12 +182,19 @@ const NAMES = {
   cursor: 'Cursor', 'gemini-cli': 'Gemini CLI',
 };
 
-let state = { q: '', tool: null, cwd: null, all: false, sessions: [], selected: null };
+let state = {
+  q: '', tool: null, cwd: null, all: false,
+  sessions: [], selected: null,
+  synced: new Set(),   // 已经出现在 Antigravity 原生会话栏里的
+  picked: new Set(),   // 当前勾选待同步的
+  agRunning: false,
+};
 
-async function api(p, opts) {
+async function api(p, opts = {}) {
   const r = await fetch(p, {
     ...opts,
-    headers: { Authorization: 'Bearer ' + TOKEN },
+    // 合并而不是覆盖：POST 要带 content-type，直接赋值会把它冲掉
+    headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + TOKEN },
   });
   if (r.status === 401) throw new Error('token 不对。用 \`xsess ui\` 重新打开这个页面。');
   if (!r.ok) throw new Error(r.status + ' ' + (await r.text()));
@@ -244,18 +277,31 @@ async function loadList() {
     $('list').innerHTML = '<div class="empty">没有匹配的会话</div>';
     return;
   }
-  $('list').innerHTML = d.sessions.map((s) =>
-    '<div class="item' + (state.selected === s.id ? ' on' : '') + '" data-id="' + esc(s.id) + '">' +
-      '<div class="t"><span class="tag" style="color:' + (COLORS[s.tool] || '#888') + '">' +
-        esc(s.prefix || '··') + '：</span>' + esc(s.title) + '</div>' +
-      '<div class="m">' + [rel(s.updatedAt), s.messageCount + ' 条', s.model, shortPath(s.cwd)]
-        .filter(Boolean).map(esc).join(' · ') + '</div>' +
-      (s.snippet ? '<div class="snip">' + hl(s.snippet) + '</div>' : '') +
-    '</div>').join('');
+  $('list').innerHTML = d.sessions.map((s) => {
+    const done = state.synced.has(s.id);
+    return '<div class="item' + (state.selected === s.id ? ' on' : '') + '" data-id="' + esc(s.id) + '">' +
+      '<input class="cb" type="checkbox"' + (state.picked.has(s.id) ? ' checked' : '') + '>' +
+      '<div class="col">' +
+        '<div class="t"><span class="tag" style="color:' + (COLORS[s.tool] || '#888') + '">' +
+          esc(s.prefix || '··') + '：</span>' + esc(s.title) +
+          (done ? '<span class="badge">已在会话栏</span>' : '') + '</div>' +
+        '<div class="m">' + [rel(s.updatedAt), s.messageCount + ' 条', s.model, shortPath(s.cwd)]
+          .filter(Boolean).map(esc).join(' · ') + '</div>' +
+        (s.snippet ? '<div class="snip">' + hl(s.snippet) + '</div>' : '') +
+      '</div></div>';
+  }).join('');
 
   document.querySelectorAll('.item').forEach((el) => {
-    el.onclick = () => openSession(el.dataset.id);
+    const id = el.dataset.id;
+    const cb = el.querySelector('.cb');
+    cb.onclick = (e) => {
+      e.stopPropagation();                       // 勾选不该顺带打开会话
+      cb.checked ? state.picked.add(id) : state.picked.delete(id);
+      renderSelCount();
+    };
+    el.onclick = () => openSession(id);
   });
+  renderSelCount();
 }
 
 async function openSession(id) {
@@ -272,6 +318,7 @@ async function openSession(id) {
       '<div class="facts">' + esc(facts.join(' · ')) + '<br>' + esc(s.id) + '</div>' +
       '<div class="acts">' +
         '<button class="primary" data-act="copy">复制交接包</button>' +
+        '<button data-act="to-antigravity">放进 Antigravity 会话栏</button>' +
         '<button data-act="to-claude-code">接力到 Claude Code</button>' +
         '<button data-act="to-codex">接力到 Codex</button>' +
       '</div>' +
@@ -299,7 +346,7 @@ async function doAction(act, id, btn) {
       const tool = act.replace('to-', '');
       const r = await api('/api/handoff/' + encodeURIComponent(id) + '/write?to=' + tool, { method: 'POST' });
       toast('已在 ' + (NAMES[tool] || tool) + ' 里创建会话，跑 ' + r.resumeHint + ' 接着做');
-      loadStats(); loadList();
+      loadSync(); loadStats(); loadList();
     }
   } catch (e) {
     toast('失败：' + e.message);
@@ -307,6 +354,70 @@ async function doAction(act, id, btn) {
     btn.disabled = false;
   }
 }
+
+function renderSelCount() {
+  $('selCount').textContent = state.picked.size ? '已选 ' + state.picked.size + ' 条' : '';
+  const busy = state.agRunning;
+  $('btnSync').disabled = busy || !state.picked.size;
+  $('btnUnsync').disabled = busy || !state.synced.size;
+}
+
+async function loadSync() {
+  const st = await api('/api/sync');
+  state.synced = new Set(st.synced.map((x) => x.sourceSession));
+  state.agRunning = st.running;
+  $('syncState').innerHTML = st.running
+    ? '<span class="warn">⚠ Antigravity 正在运行 —— 它退出时会覆盖写入的内容，' +
+      '请先完全退出（⌘Q）再同步</span>'
+    : '已同步 <b>' + st.syncedCount + '</b> 条到 Antigravity 原生会话栏 · 它当前已退出，可以同步';
+  renderSelCount();
+}
+
+$('selAll').onclick = () => {
+  const ids = state.sessions.map((s) => s.id);
+  const allPicked = ids.every((i) => state.picked.has(i));
+  ids.forEach((i) => (allPicked ? state.picked.delete(i) : state.picked.add(i)));
+  loadList();
+};
+
+$('btnSync').onclick = async () => {
+  const ids = [...state.picked];
+  if (!ids.length) return;
+  $('btnSync').disabled = true; $('btnSync').textContent = '同步中…';
+  try {
+    const r = await api('/api/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids, to: 'antigravity', write: true }),
+    });
+    const bits = [r.synced.length + ' 条已写入'];
+    if (r.skipped.length) bits.push(r.skipped.length + ' 条已存在');
+    if (r.failed.length) bits.push(r.failed.length + ' 条失败');
+    toast(bits.join('，') + '。重开 Antigravity 就能看到');
+    state.picked.clear();
+    await loadSync(); await loadList();
+  } catch (e) { toast('同步失败：' + e.message); }
+  finally { $('btnSync').disabled = false; $('btnSync').textContent = '同步选中 → Antigravity'; }
+};
+
+$('btnUnsync').onclick = async () => {
+  const picked = [...state.picked].filter((i) => state.synced.has(i));
+  const scope = picked.length ? picked : null;
+  const label = picked.length ? ('选中的 ' + picked.length + ' 条') : ('全部 ' + state.synced.size + ' 条');
+  if (!confirm('要把' + label + '从 Antigravity 的会话栏里撤掉吗？只删 xsess 写进去的，不碰你自己的会话。')) return;
+  $('btnUnsync').disabled = true;
+  try {
+    const r = await api('/api/sync', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: scope, to: 'antigravity', write: true }),
+    });
+    toast('已撤掉 ' + r.removed.length + ' 条');
+    state.picked.clear();
+    await loadSync(); await loadList();
+  } catch (e) { toast('撤销失败：' + e.message); }
+  finally { renderSelCount(); }
+};
 
 let timer = null;
 $('q').oninput = (e) => {
@@ -321,7 +432,7 @@ $('rescan').onclick = async () => {
 };
 
 async function refresh() {
-  try { await Promise.all([loadStats(), loadProjects(), loadList()]); }
+  try { await loadSync(); await Promise.all([loadStats(), loadProjects(), loadList()]); }
   catch (e) { $('list').innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
 }
 refresh();

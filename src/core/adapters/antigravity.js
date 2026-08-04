@@ -109,6 +109,10 @@ function parseDb(src, nativeId, times) {
         if (t && !isNoise(t)) title = t;
       }
 
+      // 标题步骤只是元数据，不是对话的一轮。
+      // 之前没排除它，它 payload 里夹带的原始消息会多出一条 [tool] 消息。
+      if (stepType === STEP_TITLE) continue;
+
       const msg = toMessage(stepType, strings);
       if (msg) messages.push(msg);
     }

@@ -19,6 +19,7 @@ import crypto from 'node:crypto';
 import { listSessions, searchSessions, getSession, getStats, rescan } from '../core/query.js';
 import { buildHandoff } from '../core/handoff.js';
 import { writeSession, TIER_A } from '../core/writers/index.js';
+import { syncStatus, syncMany, unsync } from '../core/sync.js';
 import { renderUi } from './ui.js';
 import { ADAPTERS, UNSUPPORTED } from '../core/adapters/index.js';
 import { XSESS_HOME, ensureXsessDirs } from '../core/paths.js';
@@ -144,6 +145,35 @@ async function route(req, res, url) {
     return pack ? send(res, 200, pack) : send(res, 404, { error: '找不到该会话' });
   }
 
+  // ── 同步管理：面板负责开关和挑选，展示还是在各家 IDE 自己的会话列表里 ──
+
+  if (p === '/api/sync' && req.method === 'GET') {
+    return send(res, 200, await syncStatus({ to: q.get('to') || 'antigravity' }));
+  }
+
+  if (p === '/api/sync' && req.method === 'POST') {
+    const body = await readJson(req);
+    const ids = Array.isArray(body.ids) ? body.ids : [];
+    if (!ids.length) return send(res, 400, { error: '没给要同步的会话' });
+    return send(
+      res,
+      200,
+      await syncMany(ids, { to: body.to || 'antigravity', write: body.write !== false }),
+    );
+  }
+
+  if (p === '/api/sync' && req.method === 'DELETE') {
+    const body = await readJson(req);
+    return send(
+      res,
+      200,
+      await unsync(Array.isArray(body.ids) && body.ids.length ? body.ids : null, {
+        to: body.to || 'antigravity',
+        write: body.write !== false,
+      }),
+    );
+  }
+
   if (p === '/api/stats' && req.method === 'GET') {
     return send(res, 200, await getStats());
   }
@@ -164,6 +194,29 @@ async function route(req, res, url) {
   }
 
   send(res, 404, { error: `未知路径: ${p}` });
+}
+
+/** 读 JSON 请求体，限 1MB —— 面板只会传一批会话 ID，不需要更大 */
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > 1e6) {
+        req.destroy();
+        reject(new Error('请求体过大'));
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (e) {
+        reject(new Error('请求体不是合法 JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
 function authorized(req, token) {

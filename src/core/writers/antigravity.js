@@ -52,6 +52,15 @@ const MODEL_TEXT_DUP = [20, 8];
 
 const STEP_USER = 14;
 const STEP_MODEL = 15;
+const STEP_TITLE = 23;
+/** 标题步骤里存标题的路径 */
+const TITLE_TEXT = [30, 4];
+/**
+ * 标题步骤里还夹带着「用来生成标题的那条原始用户消息」。
+ * 不替换的话，模板会话的内容会跟着漏进新会话里 ——
+ * 实测漏出过一整条别的会话的正文。
+ */
+const TITLE_SOURCE_TEXT = [30, 19];
 
 export function antigravityAvailable() {
   return exists(CONVERSATIONS) && exists(SUMMARIES);
@@ -100,7 +109,7 @@ export function writeAntigravitySession(pack, { write = false, allowWhileRunning
   }
 
   backupSummaries();
-  buildConversationDb(template, pack, newCascadeId, target);
+  buildConversationDb(template, pack, newCascadeId, target, title);
   appendSummary(template, newCascadeId, title);
 
   recordWrite({ tool: 'antigravity', path: target, sourceSession: pack.sessionId });
@@ -158,7 +167,9 @@ function hasUsableSteps(dbPath) {
   try {
     const u = db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_USER);
     const m = db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_MODEL);
-    return Number(u.c) > 0 && Number(m.c) > 0;
+    // 标题步骤也必须有：没有它，Antigravity 会拿第一条消息当标题
+    const t = db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_TITLE);
+    return Number(u.c) > 0 && Number(m.c) > 0 && Number(t.c) > 0;
   } catch {
     return false;
   } finally {
@@ -179,14 +190,15 @@ function stepCount(dbPath) {
 
 // ---------------------------------------------------------------- 建会话库
 
-function buildConversationDb(template, pack, newCascadeId, target) {
+function buildConversationDb(template, pack, newCascadeId, target, title) {
   // 从模板库里取两种 step 的样板
   const src = openRo(template.dbPath);
-  let userStep, modelStep, meta;
+  let userStep, modelStep, titleStep, meta;
   try {
     meta = src.prepare('SELECT * FROM trajectory_meta LIMIT 1').get();
     userStep = pickStepWithText(src, STEP_USER, USER_TEXT);
     modelStep = pickStepWithText(src, STEP_MODEL, MODEL_TEXT);
+    titleStep = pickStepWithText(src, STEP_TITLE, TITLE_TEXT);
   } finally {
     src.close();
   }
@@ -263,11 +275,41 @@ function buildConversationDb(template, pack, newCascadeId, target) {
       );
     });
 
+    // 补一条标题步骤（step_type=23）。
+    // 不补的话 Antigravity 找不到标题，会拿第一条消息的完整原文当标题 ——
+    // 实测就是这样：写进去的「cc：OCR运行时集成审查」重启后变成了整段交接抬头。
+    // 40/42 个真实会话都带这个步骤，它才是 Antigravity 认的标题来源。
+    if (titleStep) {
+      let p = replaceAt(remapUuids(Buffer.from(titleStep.step_payload), uuidMap), TITLE_TEXT, title);
+      // 连带把「生成标题所依据的那条原始消息」换成我们自己的首条消息，
+      // 否则模板会话的正文会从这里漏出去
+      if (stringAt(p, TITLE_SOURCE_TEXT) != null) {
+        p = replaceAt(p, TITLE_SOURCE_TEXT, turns[0]?.text ?? title);
+      }
+      insert.run(
+        turns.length,
+        titleStep.step_type,
+        titleStep.status,
+        titleStep.has_subtrajectory,
+        titleStep.metadata ? remapUuids(Buffer.from(titleStep.metadata), uuidMap) : null,
+        null,
+        null,
+        null,
+        titleStep.render_info ? remapUuids(Buffer.from(titleStep.render_info), uuidMap) : null,
+        p,
+        titleStep.step_format,
+      );
+    }
+
     db.exec('COMMIT');
     // 把 WAL 收回主文件并切成 DELETE 模式，否则会在 conversations/ 里
     // 留下 .db-wal / .db-shm 两个残片
     db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     db.exec('PRAGMA journal_mode=DELETE');
+    // 关键：模板库是整个复制过来的，DELETE 掉所有行之后 SQLite 不会缩容 ——
+    // 实测 49.8MB 的模板删空后还是 49.8MB，VACUUM 之后才降到 48KB。
+    // 不做这一步，批量同步几百条会话会吃掉几十 GB。
+    db.exec('VACUUM');
   } catch (e) {
     try {
       db.exec('ROLLBACK');
@@ -285,7 +327,7 @@ function buildConversationDb(template, pack, newCascadeId, target) {
 
   // 写完自己解一遍。写出一个打不开的会话，比不写更糟 ——
   // 它会出现在列表里，点开是空的，而且你不知道是哪一步错了。
-  verifyWritten(target, turnsOf(pack).length);
+  verifyWritten(target, turnsOf(pack).length, !!titleStep);
 }
 
 /** 交接抬头 + 原始轮次 */
@@ -293,12 +335,17 @@ function turnsOf(pack) {
   return [{ role: 'user', text: pack.header }, ...pack.turns];
 }
 
-function verifyWritten(target, expectedCount) {
+function verifyWritten(target, turnCount, hasTitleStep) {
   const db = openRo(target);
   try {
+    const expected = turnCount + (hasTitleStep ? 1 : 0);
     const n = Number(db.prepare('SELECT count(*) c FROM steps').get().c);
-    if (n !== expectedCount) {
-      throw new Error(`写出来的会话步骤数不对：期望 ${expectedCount}，实际 ${n}`);
+    if (n !== expected) {
+      throw new Error(`写出来的会话步骤数不对：期望 ${expected}，实际 ${n}`);
+    }
+    if (hasTitleStep) {
+      const t = Number(db.prepare('SELECT count(*) c FROM steps WHERE step_type=?').get(STEP_TITLE).c);
+      if (t !== 1) throw new Error('标题步骤没写进去，Antigravity 会拿首条消息当标题');
     }
     const empty = db
       .prepare('SELECT count(*) c FROM steps WHERE step_payload IS NULL OR length(step_payload) < 32')
