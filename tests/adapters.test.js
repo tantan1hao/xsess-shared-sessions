@@ -72,8 +72,13 @@ test('Antigravity: 所有会话都能解析且不产生纯噪音标题', async (
   if (!sources.length) return t.skip('没有会话文件');
 
   let withMessages = 0;
+  let parsed = 0;
   for (const src of sources) {
+    // Antigravity 会为「索引里挂着、文件却没了」的条目造空库，
+    // 适配器跳过它们并返回空数组 —— 那不是解析失败
     const [s] = await antigravity.parse(src);
+    if (!s) continue;
+    parsed++;
     assert.ok(s.id.startsWith('antigravity:'));
     assert.doesNotMatch(
       s.title,
@@ -82,9 +87,10 @@ test('Antigravity: 所有会话都能解析且不产生纯噪音标题', async (
     );
     if (s.messageCount > 0) withMessages++;
   }
+  assert.ok(parsed > 0, '一个会话都没解析出来');
   assert.ok(
-    withMessages / sources.length > 0.5,
-    `超过一半的会话应该有内容，实际 ${withMessages}/${sources.length} —— 低于这个值多半是格式变了`,
+    withMessages / parsed > 0.5,
+    `超过一半的会话应该有内容，实际 ${withMessages}/${parsed} —— 低于这个值多半是格式变了`,
   );
 });
 

@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getSession } from './query.js';
-import { HANDOFF_DIR, ensureXsessDirs } from './paths.js';
+import { HANDOFF_DIR, ensureXsessDirs, prefixTitle } from './paths.js';
 import { stripInjectedPreamble, oneLine } from './model.js';
 
 const TOOL_LABEL = {
@@ -127,8 +127,14 @@ export async function buildHandoff(id, opts = {}) {
 
 function buildHeader({ s, goal, files }) {
   const out = [
-    `⟨会话接力⟩ 以下内容来自 ${TOOL_LABEL[s.tool] || s.tool} 的一个会话，现在转到这里继续。`,
+    // 第一行必须是「一句话说清这是什么」——
+    // Codex 的会话列表拿 rollout 里首条用户消息重建预览文本，
+    // 抬头第一行是什么，列表里就显示什么。
+    // 原来第一行是「以下内容来自 X 的一个会话，现在转到这里继续。」，
+    // 列表里满屏都是这句套话，看不出是哪个会话。
+    `⟨接力⟩${prefixTitle(s.tool, s.title)}`,
     '',
+    `以下内容来自 ${TOOL_LABEL[s.tool] || s.tool} 的一个会话，现在转到这里继续。`,
     `原会话：${s.title}（\`${s.id}\`）`,
     s.cwd ? `工作目录：${s.cwd}` : null,
     `时间：${fmtDate(s.startedAt)} → ${fmtDate(s.updatedAt)}，共 ${s.messageCount} 条消息`,

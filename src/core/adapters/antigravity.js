@@ -74,7 +74,15 @@ export const adapter = {
     };
 
     if (src.path.endsWith('.pb')) return [parseLegacyPb(src, nativeId, times)];
-    return [parseDb(src, nativeId, times)];
+    try {
+      return [parseDb(src, nativeId, times)];
+    } catch (e) {
+      // Antigravity 会为「索引里挂着、会话文件却没了」的条目造一个空库 ——
+      // 实测 4096 字节、一张表都没有。这种残骸不是会话，跳过就好；
+      // 让它抛出去的话，一个残骸就能让整个 Antigravity 适配器解析失败。
+      if (/no such table/i.test(String(e && e.message))) return [];
+      throw e;
+    }
   },
 };
 

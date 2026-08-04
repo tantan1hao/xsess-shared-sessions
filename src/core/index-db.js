@@ -68,6 +68,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 export function openIndex(file = INDEX_DB, { readonly = false } = {}) {
   if (!readonly) fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file, { readOnly: readonly });
+  // 这个库天天有并发：daemon 每 30 秒扫一次、CLI 随时查、侧边栏也在读。
+  // 不设等待时间的话，撞上写事务就直接 SQLITE_BUSY 抛出去 ——
+  // 用户看到的是「database is locked」，其实等几十毫秒就好了。
+  db.exec('PRAGMA busy_timeout=5000');
   if (!readonly) {
     db.exec('PRAGMA journal_mode=WAL');
     db.exec('PRAGMA synchronous=NORMAL');

@@ -184,9 +184,11 @@ test('演练写出的会话库通过全部自检，且不碰 Antigravity 的目�
           assert.equal(Number(title.idx), firstModel + 1, '标题步必须紧跟第一条模型回复');
         }
       }
-      // 首条必须是我们的交接抬头，不能是模板会话的内容
-      const first = stringAt(Buffer.from(/** @type {Uint8Array} */ (steps[0].step_payload)), [19, 2]);
-      assert.ok(String(first).includes('⟨会话接力⟩'), `首条不是交接抬头：${String(first).slice(0, 40)}`);
+      // 首条必须是我们的交接抬头，不能是模板会话的内容。
+      // 抬头首行同时是 Codex 会话列表的预览文本，所以格式是 `⟨接力⟩<带前缀的标题>`
+      const first = String(stringAt(Buffer.from(/** @type {Uint8Array} */ (steps[0].step_payload)), [19, 2]));
+      assert.ok(first.startsWith('⟨接力⟩'), `首条不是交接抬头：${first.slice(0, 40)}`);
+      assert.ok(/^⟨接力⟩\w{2}：/.test(first), `抬头首行应带来源前缀：${first.slice(0, 40)}`);
     } finally {
       db.close();
     }

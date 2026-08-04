@@ -13,6 +13,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { TOOLS, exists, prefixTitle } from '../paths.js';
 import { recordWrite } from './manifest.js';
+import { indexCodexThread } from './codex-index.js';
 
 const SESSIONS = TOOLS.codex.sessions;
 const FALLBACK_CLI_VERSION = '0.146.0-alpha.9.2';
@@ -46,10 +47,13 @@ export function writeCodexSession(pack, { write = false } = {}) {
       id,
       timestamp: now.toISOString(),
       cwd,
-      // 标明是 xsess 接力生成的，跟 Codex 自己开的会话区分开
-      originator: 'xsess_handoff',
+      // originator / source 是 Codex 认的枚举，不能自己编。
+      // 实测写 'xsess' 的后果：app-server 扫到这个文件后把 threads.source
+      // 记成 'unknown'，会话就从 codex resume 的列表里被过滤掉。
+      // 来源标识改由标题前缀（cc：/ ag：…）和 ~/.xsess/written.jsonl 承担。
+      originator: 'codex-tui',
       cli_version: detectCliVersion(),
-      source: 'xsess',
+      source: 'cli',
       thread_source: 'user',
       model_provider: 'openai',
     },
@@ -99,6 +103,27 @@ export function writeCodexSession(pack, { write = false } = {}) {
   if (exists(file)) throw new Error(`目标文件已存在，不覆盖：${file}`);
   fs.writeFileSync(file, content, 'utf8');
   recordWrite({ tool: 'codex', path: file, sourceSession: pack.sessionId });
+
+  // 光有文件还不够：codex resume 的列表读的是 state 库里的 threads 表，
+  // 不登记的话文件写得再对也不会出现在列表里（实测过）。
+  const idx = indexCodexThread({
+    id,
+    rolloutPath: file,
+    cwd,
+    title: result.title,
+    firstUserMessage: pack.header,
+    cliVersion: detectCliVersion(),
+    at: now,
+    write: true,
+  });
+  result.indexed = idx.indexed;
+  if (idx.indexed) {
+    recordWrite({ tool: 'codex', path: idx.db, kind: 'index', appendedId: id, sourceSession: pack.sessionId });
+  } else {
+    // 登记失败不回滚文件 —— 文件本身是有效的，
+    // 只是要靠 `codex resume <id>` 直接指定才能打开
+    result.indexWarning = idx.reason;
+  }
   return result;
 }
 

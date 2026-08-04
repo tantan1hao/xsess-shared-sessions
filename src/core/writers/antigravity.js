@@ -224,8 +224,13 @@ function pickTemplate(cwd) {
  * 保证「筛选说能用」和「实际取得到」永远一致。
  */
 function templateFacts(dbPath) {
-  const db = openRo(dbPath);
+  // openRo 必须在 try 里面：Antigravity 目录里会有打不开的空库
+  // （它为「索引里有、文件没了」的条目造的 4KB 残骸），
+  // 放在外面的话，扫到一个残骸就让整次写入失败。
+  /** @type {any} */
+  let db = null;
   try {
+    db = openRo(dbPath);
     return {
       user: !!pickStepWithText(db, STEP_USER, USER_TEXT),
       model: !!pickStepWithText(db, STEP_MODEL, MODEL_TEXT),
@@ -235,7 +240,7 @@ function templateFacts(dbPath) {
   } catch {
     return null;
   } finally {
-    db.close();
+    if (db) db.close();
   }
 }
 
