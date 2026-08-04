@@ -24,6 +24,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { TOOLS, BACKUP_DIR, ensureXsessDirs, exists } from '../paths.js';
 
 const CODEX_HOME = path.dirname(TOOLS.codex.sessions);
+const SESSION_INDEX = path.join(CODEX_HOME, 'session_index.jsonl');
 
 /** 找当前在用的 state 库：state_<最大数字>.sqlite */
 export function findStateDb() {
@@ -47,12 +48,16 @@ export function findStateDb() {
  *
  * @param {{
  *   id: string, rolloutPath: string, cwd: string, title: string,
- *   firstUserMessage: string, cliVersion: string, at?: Date, write?: boolean
+ *   firstUserMessage: string, cliVersion: string,
+ *   source?: string, at?: Date, write?: boolean
  * }} info
  * @returns {{indexed:boolean, reason?:string, db?:string, backup?:string}}
  */
 export function indexCodexThread(info) {
-  const { id, rolloutPath, cwd, title, firstUserMessage, cliVersion, at = new Date(), write = false } = info;
+  const {
+    id, rolloutPath, cwd, title, firstUserMessage, cliVersion,
+    source = 'cli', at = new Date(), write = false,
+  } = info;
 
   const dbPath = findStateDb();
   if (!dbPath) {
@@ -142,6 +147,62 @@ export function indexCodexThread(info) {
   }
 
   return { indexed: true, db: dbPath, backup };
+}
+
+/**
+ * 给会话起个名字 —— 这决定它出不出现在 ChatGPT.app 侧边栏的「本地」分组里。
+ *
+ * ── 怎么确定是这个文件 ──
+ * 桌面版侧边栏显示的标题和 `threads.title` 对不上：
+ * 同一条会话，侧边栏写「准备起诉公司」，threads.title 是「我要起诉这个公司」。
+ * 对着 session_index.jsonl 一查，`thread_name` 正是「准备起诉公司」——
+ * 侧边栏那一组的每一条都能在这里对上号。
+ *
+ * 所以完整的「让会话出现在 Codex 里」是三层，缺一层就少一个入口：
+ *   1. `sessions/**.jsonl`     会话内容本身
+ *   2. `state_N.sqlite` threads `codex resume` 的列表
+ *   3. `session_index.jsonl`   ChatGPT.app 侧边栏的「本地」分组
+ *
+ * 这一层是三层里最安全的：纯 JSONL 追加，已有字节一个都不碰。
+ *
+ * @param {string} id
+ * @param {string} name 侧边栏里显示的名字
+ * @param {{at?:Date, write?:boolean}} [opts]
+ */
+export function nameCodexThread(id, name, { at = new Date(), write = false } = {}) {
+  if (!exists(SESSION_INDEX)) {
+    return { named: false, reason: 'session_index.jsonl 不在，桌面版侧边栏里不会出现（其余入口不受影响）' };
+  }
+  // 已经有了就不重复加 —— 这个文件是纯追加的，重复行会让侧边栏出现两条
+  try {
+    const has = fs
+      .readFileSync(SESSION_INDEX, 'utf8')
+      .split('\n')
+      .some((l) => l.includes(`"${id}"`));
+    if (has) return { named: false, reason: '已经在侧边栏索引里了' };
+  } catch {
+    /* 读不了就当没有 */
+  }
+  if (!write) return { named: false, reason: '预览模式' };
+
+  const line = JSON.stringify({ id, thread_name: name, updated_at: microIso(at) }) + '\n';
+  fs.appendFileSync(SESSION_INDEX, line, 'utf8');
+  return { named: true, path: SESSION_INDEX };
+}
+
+/** 从侧边栏索引里摘掉那一行（撤销用） */
+export function unnameCodexThread(id, { write = false } = {}) {
+  if (!exists(SESSION_INDEX)) return { removed: false };
+  const lines = fs.readFileSync(SESSION_INDEX, 'utf8').split('\n');
+  const kept = lines.filter((l) => l.trim() && !l.includes(`"${id}"`));
+  if (kept.length === lines.filter((l) => l.trim()).length) return { removed: false };
+  if (write) fs.writeFileSync(SESSION_INDEX, kept.join('\n') + '\n', 'utf8');
+  return { removed: true, kept: kept.length };
+}
+
+/** Codex 写的是微秒精度（6 位小数），JS 的 toISOString 只有毫秒 */
+function microIso(d) {
+  return d.toISOString().replace(/\.(\d{3})Z$/, '.$1000Z');
 }
 
 /** 从索引里摘掉（撤销用）。只删 id 完全匹配的那一行。 */

@@ -13,16 +13,32 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { TOOLS, exists, prefixTitle } from '../paths.js';
 import { recordWrite } from './manifest.js';
-import { indexCodexThread } from './codex-index.js';
+import { indexCodexThread, nameCodexThread } from './codex-index.js';
 
 const SESSIONS = TOOLS.codex.sessions;
 const FALLBACK_CLI_VERSION = '0.146.0-alpha.9.2';
 
 /**
- * @param {import('../handoff.js').HandoffPack} pack
- * @param {{write?:boolean}} [opts]
+ * Codex 认的来源类型（见 app-server 协议的 ThreadSourceKind）。
+ * 只用得上这两个：
+ *   cli     —— 终端 `codex` / `codex resume` 开的会话
+ *   desktop —— ChatGPT.app 里开的（它内部记成 vscode，originator 是 Codex Desktop）
+ *
+ * 为什么要能选：`codex resume` 的列表不过滤来源，两种都看得到；
+ * 但桌面版有自己的筛选，写成 cli 的会话不一定出现在它的会话栏里。
+ * 你在哪个界面用，就写成哪种。
  */
-export function writeCodexSession(pack, { write = false } = {}) {
+const ORIGINS = {
+  cli: { originator: 'codex-tui', source: 'cli' },
+  desktop: { originator: 'Codex Desktop', source: 'vscode' },
+};
+
+/**
+ * @param {import('../handoff.js').HandoffPack} pack
+ * @param {{write?:boolean, origin?:'cli'|'desktop'}} [opts]
+ */
+export function writeCodexSession(pack, { write = false, origin = 'cli' } = {}) {
+  const originFields = ORIGINS[origin] || ORIGINS.cli;
   const cwd = pack.cwd || process.cwd();
   const id = randomUUID();
   const now = new Date();
@@ -51,9 +67,9 @@ export function writeCodexSession(pack, { write = false } = {}) {
       // 实测写 'xsess' 的后果：app-server 扫到这个文件后把 threads.source
       // 记成 'unknown'，会话就从 codex resume 的列表里被过滤掉。
       // 来源标识改由标题前缀（cc：/ ag：…）和 ~/.xsess/written.jsonl 承担。
-      originator: 'codex-tui',
+      originator: originFields.originator,
       cli_version: detectCliVersion(),
-      source: 'cli',
+      source: originFields.source,
       thread_source: 'user',
       model_provider: 'openai',
     },
@@ -113,6 +129,8 @@ export function writeCodexSession(pack, { write = false } = {}) {
     title: result.title,
     firstUserMessage: pack.header,
     cliVersion: detectCliVersion(),
+    // 索引里的 source 必须和文件里的一致，否则 app-server 重扫时会改回去
+    source: originFields.source,
     at: now,
     write: true,
   });
@@ -123,6 +141,16 @@ export function writeCodexSession(pack, { write = false } = {}) {
     // 登记失败不回滚文件 —— 文件本身是有效的，
     // 只是要靠 `codex resume <id>` 直接指定才能打开
     result.indexWarning = idx.reason;
+  }
+
+  // 第三层：桌面版侧边栏的「本地」分组读的是 session_index.jsonl，
+  // 不写这一行的话，`codex resume` 里看得到、ChatGPT.app 里看不到
+  const named = nameCodexThread(id, result.title, { at: now, write: true });
+  result.named = named.named;
+  if (named.named) {
+    recordWrite({ tool: 'codex', path: named.path, kind: 'name', appendedId: id, sourceSession: pack.sessionId });
+  } else {
+    result.nameWarning = named.reason;
   }
   return result;
 }
