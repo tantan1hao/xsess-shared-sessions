@@ -119,6 +119,9 @@ export function toolPrefix(tool) {
 /** 所有已知前缀，用于剥掉标题上已有的那个 */
 const KNOWN_PREFIXES = Object.values(TOOLS).map((t) => t.prefix);
 
+/** 交接抬头首行的标记。handoff.js 生成，各家会话列表会拿首行当预览文本 */
+export const HANDOFF_MARK = '⟨接力⟩';
+
 /**
  * 剥掉标题开头已有的工具前缀。
  *
@@ -132,6 +135,13 @@ export function stripTitlePrefix(title) {
   // 循环剥：万一历史数据里已经攒了 `cc：cx：ag：` 这种，一次只剥一层是清不掉的。
   // 上限 4 层，免得把真的以 `xx：` 开头的标题内容也吃掉。
   for (let i = 0; i < 4; i++) {
+    // 交接抬头的首行标记也要剥。接力过去的会话被对方重新解析后，
+    // 标题可能变成 `⟨接力⟩cc：X`；再接力一次就叠成 `⟨接力⟩cx：⟨接力⟩cc：X`。
+    // 放在循环里，前缀和标记交替出现也能清干净。
+    if (t.startsWith(HANDOFF_MARK)) {
+      t = t.slice(HANDOFF_MARK.length).trimStart();
+      continue;
+    }
     const hit = KNOWN_PREFIXES.find((p) => t.startsWith(`${p}：`));
     if (!hit) break;
     t = t.slice(hit.length + 1);

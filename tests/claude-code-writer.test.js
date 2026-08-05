@@ -1,0 +1,124 @@
+/**
+ * Claude Code 写回的回归测试。
+ *
+ * 这家没有额外的索引层（`claude --resume` 直接扫 ~/.claude/projects/），
+ * 所以文件结构就是全部 —— 少写一个字段就是少一个功能。
+ * 下面每条断言都对着真实会话文件比对过。
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { TOOLS, exists } from '../src/core/paths.js';
+
+const PROJECTS = TOOLS['claude-code'].projects;
+
+const readJsonl = (f) =>
+  fs
+    .readFileSync(f, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+/** 写一条出来（不落盘到真实目录之外的地方，用完就撤） */
+async function writeOne(t) {
+  if (!exists(PROJECTS)) return t.skip('本机没有 Claude Code 数据');
+  const { buildHandoff } = await import('../src/core/handoff.js');
+  const { listSessions } = await import('../src/core/query.js');
+
+  const rows = await listSessions({ limit: 20 });
+  const source = rows.find((r) => r.tool !== 'claude-code');
+  if (!source) return t.skip('没有别家工具的会话可用');
+  const pack = await buildHandoff(source.id);
+  if (!pack) return t.skip('交接包构建失败');
+
+  const { writeClaudeCodeSession } = await import('../src/core/writers/claude-code.js');
+  return { pack, source, write: () => writeClaudeCodeSession(pack, { write: true }) };
+}
+
+test('标题写进 custom-title —— 会话列表显示的是它，不是 ai-title', async (t) => {
+  const ctx = await writeOne(t);
+  if (!ctx) return;
+  const { unwriteClaudeCodeSession } = await import('../src/core/writers/claude-code.js');
+
+  const r = ctx.write();
+  try {
+    const rows = readJsonl(r.path);
+    const ai = rows.find((x) => x.type === 'ai-title');
+    const custom = rows.find((x) => x.type === 'custom-title');
+
+    assert.ok(custom, 'custom-title 没写 —— 列表里显示不出我们加的来源前缀');
+    assert.equal(custom.customTitle, r.title);
+    assert.ok(ai, 'ai-title 也该写');
+    assert.equal(ai.aiTitle, r.title);
+    // 前缀标的是来源工具，不是 claude-code 自己
+    assert.match(r.title, /^\w{2}：/, `标题该带来源前缀，实际 ${r.title}`);
+  } finally {
+    unwriteClaudeCodeSession({ targetId: r.sessionId, path: r.path }, { write: true });
+  }
+});
+
+test('slug 全会话统一且非空', async (t) => {
+  const ctx = await writeOne(t);
+  if (!ctx) return;
+  const { unwriteClaudeCodeSession } = await import('../src/core/writers/claude-code.js');
+
+  const r = ctx.write();
+  try {
+    const rows = readJsonl(r.path);
+    const conv = rows.filter((x) => x.type === 'user' || x.type === 'assistant');
+    const slugs = [...new Set(conv.map((x) => x.slug))];
+    assert.equal(slugs.length, 1, `slug 不统一：${JSON.stringify(slugs)}`);
+    assert.ok(slugs[0], 'slug 是空的');
+    // 真实会话的 slug 是 URL 友好的：小写字母数字和连字符
+    assert.match(String(slugs[0]), /^[a-z0-9-]+$/, `slug 形状不对：${slugs[0]}`);
+    assert.ok(!String(slugs[0]).endsWith('-'), 'slug 结尾不该是连字符');
+  } finally {
+    unwriteClaudeCodeSession({ targetId: r.sessionId, path: r.path }, { write: true });
+  }
+});
+
+test('parentUuid 把对话串成一条完整的链', async (t) => {
+  const ctx = await writeOne(t);
+  if (!ctx) return;
+  const { unwriteClaudeCodeSession } = await import('../src/core/writers/claude-code.js');
+
+  const r = ctx.write();
+  try {
+    const conv = readJsonl(r.path).filter((x) => x.type === 'user' || x.type === 'assistant');
+    assert.ok(conv.length >= 2, '至少要有一问一答');
+    let prev = null;
+    conv.forEach((rec, i) => {
+      assert.equal(rec.parentUuid, prev, `第 ${i} 条的 parentUuid 断了 —— resume 会读不全上下文`);
+      prev = rec.uuid;
+    });
+    // sessionId 必须和文件名一致，否则 resume 找不到
+    assert.equal(path.basename(r.path, '.jsonl'), r.sessionId);
+    for (const rec of conv) assert.equal(rec.sessionId, r.sessionId);
+  } finally {
+    unwriteClaudeCodeSession({ targetId: r.sessionId, path: r.path }, { write: true });
+  }
+});
+
+test('写完再撤销，目录回到原样', async (t) => {
+  const ctx = await writeOne(t);
+  if (!ctx) return;
+  const { unwriteClaudeCodeSession } = await import('../src/core/writers/claude-code.js');
+
+  const r = ctx.write();
+  const parent = path.dirname(r.path);
+  const before = fs.readdirSync(parent).length;
+  assert.ok(exists(r.path), '文件没写出来');
+
+  unwriteClaudeCodeSession({ targetId: r.sessionId, path: r.path }, { write: true });
+  assert.ok(!exists(r.path), '撤销后文件还在');
+  assert.equal(fs.readdirSync(parent).length, before - 1, '撤销后目录没回到原样');
+});

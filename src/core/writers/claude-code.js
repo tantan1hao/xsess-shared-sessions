@@ -40,6 +40,10 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
   const now = Date.now();
   let tick = 0;
 
+  // 会话级的 URL 友好标识，真实会话里每一行都带着同一个值。
+  // 从标题派生，跟 Claude Code 自己生成的形状保持一致。
+  const slug = toSlug(title, sessionId);
+
   const base = (type) => ({
     parentUuid,
     isSidechain: false,
@@ -51,6 +55,7 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
     sessionId,
     version,
     gitBranch: pack.gitBranch || '',
+    slug,
     // 标明来源，将来在 Claude Code 里看到这条会话能知道它是接力来的
     entrypoint: 'xsess-handoff',
   });
@@ -88,7 +93,14 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
     parentUuid = rec.uuid;
   }
 
+  // 标题有两行，作用不一样：
+  //   ai-title      模型自己起的标题
+  //   custom-title  用户改过的标题 —— **会话列表显示的是这个**
+  // 实测同一条会话 aiTitle 是「实现AI IDE共享会话栏」，customTitle 是
+  // 「共享会话栏 AI IDE 互通」，而列表里显示的是后者。
+  // 只写 ai-title 的话，我们加的来源前缀（cx：/ ag：…）根本露不出来。
   records.push({ type: 'ai-title', aiTitle: title, sessionId });
+  records.push({ type: 'custom-title', customTitle: title, sessionId });
   records.push({
     type: 'last-prompt',
     lastPrompt: pack.header.slice(0, 400),
@@ -114,6 +126,22 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
   fs.writeFileSync(file, content, 'utf8');
   recordWrite({ tool: 'claude-code', path: file, targetId: sessionId, sourceSession: pack.sessionId });
   return result;
+}
+
+/**
+ * 标题 → slug。照着 Claude Code 自己生成的形状来：
+ * 全小写、非字母数字压成连字符、掐掉首尾的连字符。
+ * 中文标题会被压没，这时退回一个带会话 ID 的兜底值 ——
+ * 空 slug 比难看的 slug 更容易出问题。
+ */
+function toSlug(title, fallbackId = '') {
+  const s = String(title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/, '');
+  return s || `session-${String(fallbackId).slice(0, 8) || 'handoff'}`;
 }
 
 /**

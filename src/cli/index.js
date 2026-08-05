@@ -892,6 +892,50 @@ async function cmdDaemon(args) {
     return new Promise(() => {}); // 前台常驻
   }
 
+  // daemon 常驻，改了代码它不会自己重载 —— 旧代码会照常每 30 秒扫一次，
+  // 把按新逻辑扫出来的结果又覆盖回旧的。踩过一次：标题清洗改好了，
+  // scan --force 出来是对的，几十秒后又变回脏值。
+  if (sub === 'restart' || sub === 'stop') {
+    const state = loadState();
+    const targetPort = state.port || port;
+    let pid = null;
+    try {
+      const r = await fetch(`http://127.0.0.1:${targetPort}/api/health`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      pid = /** @type {any} */ (await r.json()).pid;
+    } catch {
+      /* 没在跑 */
+    }
+    if (pid) {
+      try {
+        process.kill(pid, 'SIGTERM');
+        process.stdout.write(c.green('✓ ') + `已停掉旧 daemon（pid ${pid}）\n`);
+      } catch (e) {
+        process.stderr.write(c.red(`停不掉 pid ${pid}：${e.message}\n`));
+        return 1;
+      }
+    } else {
+      process.stdout.write(c.gray('· daemon 本来就没在跑\n'));
+    }
+    if (sub === 'stop') return 0;
+
+    // 等端口释放再起，否则新进程 listen 会撞上 EADDRINUSE
+    for (let i = 0; i < 20; i++) {
+      try {
+        await fetch(`http://127.0.0.1:${targetPort}/api/health`, { signal: AbortSignal.timeout(300) });
+        await new Promise((r) => setTimeout(r, 100));
+      } catch {
+        break; // 连不上了 = 端口空了
+      }
+    }
+    const { startDaemon } = await import('../daemon/server.js');
+    startDaemon({ port: targetPort });
+    process.stdout.write(c.green('✓ ') + `daemon 已用当前代码重启 http://127.0.0.1:${targetPort}\n`);
+    process.stdout.write(c.gray('Ctrl-C 退出。要长期后台跑用 `xsess daemon install --write`\n'));
+    return new Promise(() => {});
+  }
+
   if (sub === 'install' || sub === 'uninstall') {
     const r =
       sub === 'install' ? launchd.install({ port, write: !!args.write }) : launchd.uninstall({ write: !!args.write });
