@@ -16,6 +16,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { TOOLS, encodeClaudeProjectSlug, exists, prefixTitle } from '../paths.js';
 import { recordWrite, recordUnwrite, listWrites } from './manifest.js';
+import { indexDesktopSession, unindexDesktopSession } from './claude-desktop-index.js';
 
 const PROJECTS = TOOLS['claude-code'].projects;
 /** 找不到已装版本时的兜底。写错版本号不影响 resume，只影响统计。 */
@@ -138,6 +139,23 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
   if (exists(file)) throw new Error(`目标文件已存在，不覆盖：${file}`); // UUID 撞车，理论上不可能
   fs.writeFileSync(file, content, 'utf8');
   recordWrite({ tool: 'claude-code', path: file, targetId: sessionId, sourceSession: pack.sessionId });
+
+  // 第二层：桌面版侧边栏读的是它自己的 claude-code-sessions 目录，不看 projects/。
+  // 不写这一条的话，`claude --resume` 里看得到、Claude 桌面版里看不到。
+  const idx = indexDesktopSession({ cliSessionId: sessionId, cwd, title, at: new Date(now), write: true });
+  result.indexed = idx.indexed;
+  if (idx.indexed) {
+    recordWrite({
+      tool: 'claude-code',
+      path: idx.path,
+      kind: 'desktop-index',
+      appendedId: sessionId,
+      sourceSession: pack.sessionId,
+    });
+  } else {
+    // 登记失败不回滚文件 —— 文件本身有效，只是桌面版侧边栏里看不到
+    result.indexWarning = idx.reason;
+  }
   return result;
 }
 
@@ -169,6 +187,10 @@ export function unwriteClaudeCodeSession(target, { write = false } = {}) {
   if (target.path && exists(target.path)) {
     removed.push('会话文件');
     if (write) fs.rmSync(target.path, { force: true });
+  }
+  if (target.targetId) {
+    const idx = unindexDesktopSession(target.targetId, { write });
+    if (idx.removed) removed.push('桌面版侧边栏');
   }
   if (write) recordUnwrite('claude-code', target);
   return { tool: 'claude-code', targetId: target.targetId, path: target.path, removed };

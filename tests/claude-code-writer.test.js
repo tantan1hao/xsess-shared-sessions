@@ -138,6 +138,43 @@ test('entrypoint / version 用本机真实取值，不能自己编', async (t) =
   }
 });
 
+test('写进去的会话登记进了桌面版侧边栏的索引', async (t) => {
+  const { desktopIndexAvailable, activeSessionGroup } = await import(
+    '../src/core/writers/claude-desktop-index.js'
+  );
+  if (!desktopIndexAvailable()) return t.skip('本机没有 Claude 桌面版');
+  const ctx = await writeOne(t);
+  if (!ctx) return;
+  const { unwriteClaudeCodeSession } = await import('../src/core/writers/claude-code.js');
+
+  const group = activeSessionGroup();
+  assert.ok(group, '找不到桌面版当前在用的会话组');
+  const countJson = () => fs.readdirSync(group.dir).filter((f) => f.endsWith('.json')).length;
+  const before = countJson();
+
+  const r = ctx.write();
+  try {
+    // 光写 ~/.claude/projects 是不够的：桌面版侧边栏读的是它自己那个目录
+    assert.equal(countJson(), before + 1, '桌面版索引里没多出记录 —— 侧边栏看不到这条会话');
+
+    const rec = fs
+      .readdirSync(group.dir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => JSON.parse(fs.readFileSync(path.join(group.dir, f), 'utf8')))
+      .find((x) => x.cliSessionId === r.sessionId);
+    assert.ok(rec, '索引里找不到 cliSessionId 对应的记录');
+    assert.equal(rec.title, r.title);
+    assert.equal(rec.isArchived, false, '归档的不会出现在侧边栏');
+    assert.match(String(rec.sessionId), /^local_/, 'sessionId 要用 local_ 前缀');
+    // model / permissionMode 是桌面版自己的运行配置，必须照抄同组真实记录
+    assert.equal(rec.model, group.sample.model);
+    assert.equal(rec.permissionMode, group.sample.permissionMode);
+  } finally {
+    unwriteClaudeCodeSession({ targetId: r.sessionId, path: r.path }, { write: true });
+  }
+  assert.equal(countJson(), before, '撤销后桌面版索引没回到原样');
+});
+
 test('parentUuid 把对话串成一条完整的链', async (t) => {
   const ctx = await writeOne(t);
   if (!ctx) return;
