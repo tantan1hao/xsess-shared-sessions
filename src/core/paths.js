@@ -131,28 +131,49 @@ export const HANDOFF_MARK = '⟨接力⟩';
  * 不剥就会变成 `cc：ag：X`，多接力几次还会一路累积成 `cc：cx：ag：X`。
  */
 export function stripTitlePrefix(title) {
+  return splitTitle(title).rest;
+}
+
+/**
+ * 拆开标题：最原始的来源前缀 + 干净的正文。
+ *
+ * 一路剥到底而不是只剥一层：历史数据里可能攒了 `cc：cx：ag：` 这种，
+ * 中间还夹着交接抬头的 `⟨接力⟩` 标记（接力过去的会话被对方重新解析后，
+ * 标题会变成 `⟨接力⟩cc：X`，再接一次就叠成 `⟨接力⟩cx：⟨接力⟩cc：X`）。
+ *
+ * origin 取**最内层**那个：越往里越早，最内层才是内容最初的出处。
+ * 上限 4 层，免得把真的以 `xx：` 开头的标题正文也吃掉。
+ */
+function splitTitle(title) {
   let t = String(title == null ? '' : title);
-  // 循环剥：万一历史数据里已经攒了 `cc：cx：ag：` 这种，一次只剥一层是清不掉的。
-  // 上限 4 层，免得把真的以 `xx：` 开头的标题内容也吃掉。
+  let origin = null;
   for (let i = 0; i < 4; i++) {
-    // 交接抬头的首行标记也要剥。接力过去的会话被对方重新解析后，
-    // 标题可能变成 `⟨接力⟩cc：X`；再接力一次就叠成 `⟨接力⟩cx：⟨接力⟩cc：X`。
-    // 放在循环里，前缀和标记交替出现也能清干净。
     if (t.startsWith(HANDOFF_MARK)) {
       t = t.slice(HANDOFF_MARK.length).trimStart();
       continue;
     }
     const hit = KNOWN_PREFIXES.find((p) => t.startsWith(`${p}：`));
     if (!hit) break;
+    origin = hit;
     t = t.slice(hit.length + 1);
   }
-  return t;
+  return { origin, rest: t };
 }
 
 /**
- * 给标题加上工具前缀：`cc：会话标题`。
- * 幂等，且不会叠加 —— 已有的前缀先剥掉再换成新的。
+ * 给标题加上来源前缀：`cc：会话标题`。
+ *
+ * 前缀标的是**内容最初从哪来**，不是「我从哪个中转站拿到的」。
+ * 所以标题里已经有前缀时保留它，而不是换成当前这一手的工具：
+ *
+ *   Claude Code 的会话 →（接力）→ Codex →（再接回）→ Claude Code
+ *
+ * 最后一步如果换成 `cx：`，就等于说这条内容是 Codex 的 —— 它不是，
+ * Codex 只是中间转了一手。保留 `cc：` 才对得上会话的实际出处。
+ *
+ * 幂等，且不会叠加。
  */
 export function prefixTitle(tool, title) {
-  return `${toolPrefix(tool)}：${stripTitlePrefix(title)}`;
+  const { origin, rest } = splitTitle(title);
+  return `${origin || toolPrefix(tool)}：${rest}`;
 }
