@@ -115,14 +115,36 @@ xsess sync remove --all --to claude-code --write
 
 | 工具 | 要写的层 |
 |---|---|
-| Claude Code | 会话文件（`--resume` 直接扫目录）。标题必须写 `custom-title` 行 —— 列表显示的是它，不是 `ai-title` |
+| Claude Code | ① `~/.claude/projects/**/<uuid>.jsonl`（`claude --resume` 扫这里）② `~/Library/Application Support/Claude/claude-code-sessions/<窗口>/<会话组>/local_<uuid>.json`（**桌面版侧边栏读这里**） |
 | Codex | ① 会话文件 ② `state_N.sqlite` 的 `threads` 表（`codex resume` 的列表）③ `session_index.jsonl`（ChatGPT.app 侧边栏的「本地」分组） |
 | Antigravity | ① `conversations/<uuid>.db` ② `agyhub_summaries_proto.pb` 追加一条记录 |
 
-Codex 那三层是逐个撞出来的：只写文件，`codex resume` 里查无此人；
-补上 `threads` 表，终端能看到了但桌面版侧边栏还是没有 —— 因为它读的是第三个文件。
-`session_meta.source` 还必须是 Codex 认的枚举（`cli` / `vscode`），
-写自定义值会被判成 `unknown` 然后从列表里过滤掉。
+这些层是一层层撞出来的，每次都是同一个形状的教训 ——
+**会话内容和会话列表分开存，写对了内容不等于列表里看得见。**
+
+Codex：只写文件，`codex resume` 里查无此人；补上 `threads` 表，
+终端能看到了但桌面版侧边栏还是没有，因为它读的是第三个文件。
+
+Claude Code：往 projects 写了 156 个文件、字段和真实会话逐个对齐，
+桌面版侧边栏依然一条不多 —— 它压根不读 projects 目录。
+两层 UUID 分别是窗口和会话组，桌面版一次只展示当前窗口那一组，
+落错组等于没写（判据是组内最大的 `lastFocusedAt`）。
+
+### 别自己编枚举值
+
+同一个错误犯了两次，值得单独记一条：
+
+- Codex 的 `session_meta.source` 写成 `'xsess'` → app-server 把
+  `threads.source` 记成 `unknown` → 会话从列表里被过滤掉
+- Claude Code 的 `entrypoint` 写成 `'xsess-handoff'` → 同样看不见
+  （本机真实会话 100/100 都是 `'claude-desktop'`）
+
+凡是取值来自固定集合的字段，一律照抄目标工具自己写出来的真实值。
+来源标识由标题前缀（`cx：` / `ag：`）和 `~/.xsess/written.jsonl` 承担，
+不要塞进人家的枚举字段里。
+
+`model` / `permissionMode` / `sandbox_policy` 这类运行配置同理 ——
+照抄同组里的真实记录，不自己编。
 
 ---
 
