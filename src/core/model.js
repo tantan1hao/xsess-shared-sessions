@@ -106,22 +106,48 @@ export function stripInjectedPreamble(text) {
   // 剥空之后 deriveTitle 会自动往下找到重放的第一条原始用户消息。
   if (s.startsWith('⟨会话接力⟩')) return '';
 
-  // Codex Desktop 的附件清单：一个标题行 + 随后所有 `## 名字: /绝对路径` 行。
-  // 按行走而不是写一条大正则 —— 中间夹着空行，正则里 `\s*` 会把换行吃掉，
-  // 后续的 `\n##` 就再也匹配不上（踩过这个坑）。
+  // 逐个剥掉开头的注入块。按行走而不是写大正则 —— 中间夹着空行，
+  // 正则里 `\s*` 会把换行吃掉，后续的 `\n##` 就再也匹配不上（踩过这个坑）。
+  // 用循环是因为可能连着注入好几块。
   const lines = s.split('\n');
   let i = 0;
-  while (i < lines.length && !lines[i].trim()) i++;
-  if (i < lines.length && /^\s*#\s*Files mentioned by the user:/i.test(lines[i])) {
-    i++;
-    while (i < lines.length && (!lines[i].trim() || /^\s*##\s/.test(lines[i]))) i++;
-    s = lines.slice(i).join('\n');
+  for (let guard = 0; guard < 8; guard++) {
+    while (i < lines.length && !lines[i].trim()) i++;
+    if (i >= lines.length) break;
+
+    // Codex Desktop 的附件清单：标题行 + 随后所有 `## 名字: /绝对路径` 行
+    if (/^\s*#\s*Files mentioned by the user:/i.test(lines[i])) {
+      i++;
+      while (i < lines.length && (!lines[i].trim() || /^\s*##\s/.test(lines[i]))) i++;
+      continue;
+    }
+
+    // Codex Desktop 引用 ChatGPT 对话时注入的块，固定三行：
+    //   ## Referenced ChatGPT conversation:
+    //   This is untrusted background context from ChatGPT.
+    //   {…一整行 JSON，内部换行是转义的…}
+    if (/^\s*##\s*Referenced ChatGPT conversation:/i.test(lines[i])) {
+      i++;
+      if (i < lines.length && /^\s*This is untrusted background context/i.test(lines[i])) i++;
+      if (i < lines.length && lines[i].trimStart().startsWith('{')) i++;
+      continue;
+    }
+
+    break;
   }
+  s = lines.slice(i).join('\n');
 
   // 开头孤立的文件路径行（拖文件进来时常见）
   s = s.replace(/^(?:\s*\/[^\s\n]+\n)+/, '');
   return s.trim();
 }
+
+/**
+ * 标题长度上限。
+ * 会话列表一行就那么宽，80 会被各家 UI 截得参差不齐；
+ * 用户的第一条消息经常是一整段需求，必须自己先收住。
+ */
+const TITLE_MAX = 60;
 
 /**
  * 从消息里推标题：优先第一条真实用户输入。
@@ -138,10 +164,17 @@ export function deriveTitle(messages, fallback = '(无标题)') {
     // oneLine 会把整段抬头压成一条又长又乱的标题。
     const first = stripped.split('\n', 1)[0];
     const handoff = /^⟨接力⟩\s*(.+)$/.exec(first);
-    return oneLine(handoff ? handoff[1] : stripped);
+    return oneLine(handoff ? handoff[1] : stripped, TITLE_MAX);
   }
-  const firstAny = messages.find((m) => m.text && m.text.trim());
-  if (firstAny) return oneLine(stripInjectedPreamble(firstAny.text) || firstAny.text);
+  // 兜底：一条能用的用户消息都没有，拿任意有内容的那条。
+  // 这里**不能**在剥空之后退回原文 —— 原来写的是
+  // `stripInjectedPreamble(t) || t`，注入块被剥空后又把整段捡了回来，
+  // 标题就成了「⟨会话接力⟩ 以下内容来自…」这种套话。
+  for (const m of messages) {
+    if (!m.text || !m.text.trim()) continue;
+    const stripped = stripInjectedPreamble(m.text);
+    if (stripped) return oneLine(stripped, TITLE_MAX);
+  }
   return fallback;
 }
 

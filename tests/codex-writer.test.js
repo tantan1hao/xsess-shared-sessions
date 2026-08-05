@@ -94,8 +94,13 @@ test('写出去的 rollout 用的是 Codex 认得的 source/originator', async (
   const { writeCodexSession } = await import('../src/core/writers/codex.js');
   const { listSessions } = await import('../src/core/query.js');
 
-  const rows = await listSessions({ limit: 5 });
-  const source = rows.find((r) => r.tool !== 'codex');
+  // 按工具逐个找，不靠混排列表的排序（整批同步之后前几十条会被一家占满）
+  let source = null;
+  for (const tool of ['claude-code', 'antigravity', 'cursor', 'gemini-cli']) {
+    const rows = await listSessions({ tool, limit: 5 });
+    source = rows.find((r) => (r.messageCount || 0) >= 2);
+    if (source) break;
+  }
   if (!source) return t.skip('没有别家工具的会话可用');
   const pack = await buildHandoff(source.id);
   if (!pack) return t.skip('交接包构建失败');

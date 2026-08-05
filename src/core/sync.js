@@ -117,10 +117,12 @@ export function afterSyncHint(tool) {
 /**
  * 批量同步。
  * @param {string[]} ids 源会话 ID
- * @param {{to?:string, write?:boolean, allowWhileRunning?:boolean}} [opts]
+ * @param {{to?:string, write?:boolean, allowWhileRunning?:boolean,
+ *   onProgress?:(done:number, total:number, last:string)=>void}} [opts]
+ *   onProgress：整批几百条时要能看到进度，不然像卡死了
  */
 export async function syncMany(ids, opts = {}) {
-  const { to = 'antigravity', write = false, allowWhileRunning = false } = opts;
+  const { to = 'antigravity', write = false, allowWhileRunning = false, onProgress } = opts;
   if (!TIER_A.includes(to)) throw new Error(`不支持同步到 ${to}（支持：${TIER_A.join(', ')}）`);
 
   if (write && !allowWhileRunning && targetRunning(to)) {
@@ -132,23 +134,29 @@ export async function syncMany(ids, opts = {}) {
   const already = syncedMap(to);
   const results = { target: to, synced: [], skipped: [], failed: [] };
 
+  let done = 0;
   for (const id of ids) {
+    done++;
     if (already.has(id)) {
       results.skipped.push({ id, reason: '已经同步过' });
+      if (onProgress) onProgress(done, ids.length, '');
       continue;
     }
     try {
       const pack = await buildHandoff(id);
       if (!pack) {
         results.failed.push({ id, error: '找不到该会话' });
+        if (onProgress) onProgress(done, ids.length, '');
         continue;
       }
       const r = await writeSession(to, pack, { write, allowWhileRunning });
       results.synced.push({ id, title: r.title, path: r.path, targetId: r.sessionId });
       // 预览模式下也要防止同一批里重复挑同一条
       already.set(id, { path: r.path, targetId: r.sessionId, createdAt: '' });
+      if (onProgress) onProgress(done, ids.length, r.title);
     } catch (e) {
       results.failed.push({ id, error: e.message });
+      if (onProgress) onProgress(done, ids.length, '');
     }
   }
   return results;

@@ -34,8 +34,15 @@ async function writeOne(t) {
   const { buildHandoff } = await import('../src/core/handoff.js');
   const { listSessions } = await import('../src/core/query.js');
 
-  const rows = await listSessions({ limit: 20 });
-  const source = rows.find((r) => r.tool !== 'claude-code');
+  // 按工具逐个找，不靠混排列表的排序 ——
+  // 往 Claude Code 里整批同步过之后，列表前几十条全是它自己的，
+  // 用 find(tool !== 'claude-code') 会一条都挑不到，测试就静默跳过了
+  let source = null;
+  for (const tool of ['codex', 'antigravity', 'cursor', 'gemini-cli']) {
+    const rows = await listSessions({ tool, limit: 5 });
+    source = rows.find((r) => (r.messageCount || 0) >= 2);
+    if (source) break;
+  }
   if (!source) return t.skip('没有别家工具的会话可用');
   const pack = await buildHandoff(source.id);
   if (!pack) return t.skip('交接包构建失败');

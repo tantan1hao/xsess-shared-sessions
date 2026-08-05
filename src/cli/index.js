@@ -640,26 +640,74 @@ async function cmdSync(args) {
     return 0;
   }
 
-  // xsess sync add <ID…>
+  // xsess sync add <ID…> | --from <工具>
   if (sub === 'add') {
+    let resolved = [];
     const ids = args._.slice(2);
-    if (!ids.length) {
-      process.stderr.write(c.red('要同步哪些会话？用法：xsess sync add <ID…> [--write]\n'));
+
+    if (args.from) {
+      // 整批接入某一家。手工拼几百个 ID 不现实，而且容易漏。
+      const { listSessions } = await import('../core/query.js');
+      const rows = await listSessions({
+        tool: args.from,
+        limit: args.limit ? parseInt(args.limit, 10) : 500,
+        includeSubagents: !!args.all,
+      });
+      // 只有一句 hi 的空会话接过去没意义，只会把对方的列表撑满
+      const min = args.min ? parseInt(args.min, 10) : 2;
+      const picked = rows.filter((s) => (s.messageCount || 0) >= min);
+      resolved = picked.map((s) => s.id);
+      process.stdout.write(
+        c.gray(
+          `从 ${toolName(args.from)} 选出 ${picked.length} 条` +
+            `（跳过 ${rows.length - picked.length} 条消息数 < ${min} 的${args.all ? '' : '，子代理会话默认不算'}）\n\n`,
+        ),
+      );
+    } else if (ids.length) {
+      // ID 允许写前缀，这里先解析成完整 ID
+      for (const key of ids) {
+        const pack = await buildHandoff(key);
+        if (!pack) {
+          process.stderr.write(c.red(`找不到会话：${key}\n`));
+          return 1;
+        }
+        resolved.push(pack.sessionId);
+      }
+    } else {
+      process.stderr.write(
+        c.red('要同步哪些会话？给 ID，或用 --from <工具> 整批接入。\n') +
+          c.gray('  例：xsess sync add --from codex --to claude-code --write\n'),
+      );
       return 1;
     }
-    // ID 允许写前缀，这里先解析成完整 ID
-    const resolved = [];
-    for (const key of ids) {
-      const pack = await buildHandoff(key);
-      if (!pack) {
-        process.stderr.write(c.red(`找不到会话：${key}\n`));
-        return 1;
-      }
-      resolved.push(pack.sessionId);
+
+    if (!resolved.length) {
+      process.stdout.write(c.gray('没有符合条件的会话。\n'));
+      return 0;
     }
-    const r = await S.syncMany(resolved, { to, write: !!args.write });
-    for (const x of r.synced) {
-      process.stdout.write(`  ${args.write ? c.green('✓') : c.yellow('将写')} ${x.title}\n`);
+
+    // 整批几百条要跑几分钟，没有进度看着像卡死
+    const showProgress = resolved.length > 5 && process.stderr.isTTY;
+    const r = await S.syncMany(resolved, {
+      to,
+      write: !!args.write,
+      onProgress: showProgress
+        ? (done, total, last) => {
+            const bar = `  ${done}/${total} ${last ? truncWidth(last, 40) : ''}`;
+            process.stderr.write(`\r${' '.repeat(70)}\r${c.gray(bar)}`);
+            if (done === total) process.stderr.write('\n');
+          }
+        : undefined,
+    });
+    // 整批的时候逐条列出来太吵，只报数字
+    if (resolved.length > 20) {
+      process.stdout.write(
+        `  ${args.write ? c.green('✓ 已写入') : c.yellow('将写入')} ${r.synced.length} 条\n`,
+      );
+    } else {
+      for (const x of r.synced) {
+        process.stdout.write(`  ${args.write ? c.green('✓') : c.yellow('将写')} ${x.title}\n`);
+      }
     }
     for (const x of r.skipped) process.stdout.write(`  ${c.gray('跳过')} ${x.id} —— ${x.reason}\n`);
     for (const x of r.failed) process.stdout.write(`  ${c.red('✗')} ${x.id} —— ${x.error}\n`);
