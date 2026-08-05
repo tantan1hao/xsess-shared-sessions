@@ -23,11 +23,15 @@
 ## 装起来
 
 先把 `xsess` 挂到 PATH 上 —— 下面所有命令都假设你做了这步。
-不想装也行，那就把每条命令开头的 `xsess` 替换成 `node bin/xsess.js`（在仓库目录下跑）。
+**要在仓库目录里跑**（`npm link` 认的是当前目录的 package.json，
+在上级目录跑会报 `ENOENT: package.json`）：
 
 ```bash
-npm link
+cd /path/to/xsess && npm link
 ```
+
+装完在任意目录都能用 `xsess`。不想装也行，那就 `cd` 到仓库目录，
+把每条命令开头的 `xsess` 替换成 `node bin/xsess.js`。
 
 零运行时依赖，不会装任何第三方包 —— 只是把 `bin/` 里那三个入口软链到全局。
 需要 Node 22+（用到内置的 `node:sqlite`）。
