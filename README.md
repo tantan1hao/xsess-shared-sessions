@@ -22,18 +22,28 @@
 
 ## 装起来
 
+先把 `xsess` 挂到 PATH 上 —— 下面所有命令都假设你做了这步。
+不想装也行，那就把每条命令开头的 `xsess` 替换成 `node bin/xsess.js`（在仓库目录下跑）。
+
 ```bash
-node bin/xsess.js scan
+npm link
+```
+
+零运行时依赖，不会装任何第三方包 —— 只是把 `bin/` 里那三个入口软链到全局。
+需要 Node 22+（用到内置的 `node:sqlite`）。
+
+```bash
+xsess scan
 ```
 
 首次全量扫描的耗时取决于会话总量（几百个会话约 1 分钟），之后增量扫描通常在 100ms 以内。然后：
 
 ```bash
-node bin/xsess.js mcp install --write
+xsess mcp install --write
 ```
 
 ```bash
-node bin/xsess.js ide install --write
+xsess ide install --write
 ```
 
 两条命令默认都是**预览**，加 `--write` 才真的改配置，改前自动备份到 `~/.xsess/backups/`。
@@ -44,21 +54,21 @@ node bin/xsess.js ide install --write
 ## 常用命令
 
 ```bash
-node bin/xsess.js list --tool codex -n 10
+xsess list --tool codex -n 10
 ```
 
 ```bash
-node bin/xsess.js search "上次那个方案"
+xsess search "上次那个方案"
 ```
 
 ```bash
-node bin/xsess.js list --cwd
+xsess list --cwd
 ```
 
 `--cwd` 不给值就是当前目录 —— 看这个项目在各家工具里的所有会话。
 
 ```bash
-node bin/xsess.js handoff <会话ID> --to claude-code --write
+xsess handoff <会话ID> --to claude-code --write
 ```
 
 把某个会话接续到别的工具，`--to` 支持 `claude-code` / `codex` / `antigravity`：
@@ -67,6 +77,48 @@ node bin/xsess.js handoff <会话ID> --to claude-code --write
 - `codex` → `codex resume` 列表里直接出现
 - `antigravity` → 出现在它**原生的** Conversation History / Projects 面板里
   （需要先完全退出 Antigravity）
+
+---
+
+## 整批接入
+
+`handoff` 一次接一条。想把某一家的会话**整批**放进另一家的会话列表，用 `sync`：
+
+```bash
+xsess sync add --from codex --to claude-code --write
+```
+
+默认跳过只有一两句话的空会话和子代理会话（`--min` / `--all` 可调），
+几百条时显示进度。走索引不重新解析源文件，156 条约 1.5 秒。
+
+```bash
+xsess sync --to claude-code
+```
+
+看状态：已同步几条、有没有残骸、目标应用是否在跑。撤销：
+
+```bash
+xsess sync remove --all --to claude-code --write
+```
+
+只删 xsess 自己写进去的（依据 `~/.xsess/written.jsonl`），你原本的会话一条都不碰。
+`--orphans` 只清残骸 —— 目标应用把会话文件清掉了、索引条目还挂着的那种，
+在人家列表里点开是空的。
+
+### 一条会话要写几个地方
+
+不是「写个文件就完事」，各家的会话列表读的东西不一样，少写一层就少一个入口：
+
+| 工具 | 要写的层 |
+|---|---|
+| Claude Code | 会话文件（`--resume` 直接扫目录）。标题必须写 `custom-title` 行 —— 列表显示的是它，不是 `ai-title` |
+| Codex | ① 会话文件 ② `state_N.sqlite` 的 `threads` 表（`codex resume` 的列表）③ `session_index.jsonl`（ChatGPT.app 侧边栏的「本地」分组） |
+| Antigravity | ① `conversations/<uuid>.db` ② `agyhub_summaries_proto.pb` 追加一条记录 |
+
+Codex 那三层是逐个撞出来的：只写文件，`codex resume` 里查无此人；
+补上 `threads` 表，终端能看到了但桌面版侧边栏还是没有 —— 因为它读的是第三个文件。
+`session_meta.source` 还必须是 Codex 认的枚举（`cli` / `vscode`），
+写自定义值会被判成 `unknown` 然后从列表里过滤掉。
 
 ---
 
