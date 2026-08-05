@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { TOOLS, encodeClaudeProjectSlug, exists, prefixTitle } from '../paths.js';
-import { recordWrite } from './manifest.js';
+import { recordWrite, recordUnwrite } from './manifest.js';
 
 const PROJECTS = TOOLS['claude-code'].projects;
 /** 找不到已装版本时的兜底。写错版本号不影响 resume，只影响统计。 */
@@ -157,6 +157,7 @@ export function unwriteClaudeCodeSession(target, { write = false } = {}) {
     removed.push('会话文件');
     if (write) fs.rmSync(target.path, { force: true });
   }
+  if (write) recordUnwrite('claude-code', target);
   return { tool: 'claude-code', targetId: target.targetId, path: target.path, removed };
 }
 

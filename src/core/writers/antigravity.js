@@ -39,7 +39,7 @@ import {
   splitFields,
   lenDelim,
 } from '../protobuf-edit.js';
-import { recordWrite } from './manifest.js';
+import { recordWrite, recordUnwrite } from './manifest.js';
 import { openReadOnlySafe } from '../sqlite-open.js';
 
 const AG_ROOT = path.dirname(TOOLS.antigravity.conversations);
@@ -664,6 +664,7 @@ export function unwriteAntigravitySession(target, { write = false, allowWhileRun
     }
   }
 
+  if (write) recordUnwrite('antigravity', target);
   return { tool: 'antigravity', targetId, path: dbPath, removed, ...stats };
 }
 

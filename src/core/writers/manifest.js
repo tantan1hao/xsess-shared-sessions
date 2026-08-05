@@ -19,6 +19,25 @@ export function recordWrite(entry) {
   fs.appendFileSync(MANIFEST, line, 'utf8');
 }
 
+/**
+ * 记一笔撤销。
+ *
+ * 谁执行删除谁记账 —— 之前只有 sync 层记，直接调 writer 的 unwrite 撤掉的
+ * （测试就是这么用的）在清单里仍留着写入记录，于是被当成「孤儿」一直挂着。
+ *
+ * @param {string} tool
+ * @param {{targetId?:string, path?:string, sourceSession?:string}} target
+ */
+export function recordUnwrite(tool, target) {
+  recordWrite({
+    tool,
+    path: target.path || '',
+    kind: 'unsync',
+    appendedId: target.targetId,
+    sourceSession: target.sourceSession,
+  });
+}
+
 export function listWrites() {
   try {
     return fs

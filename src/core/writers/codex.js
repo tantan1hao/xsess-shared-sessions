@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { TOOLS, exists, prefixTitle } from '../paths.js';
-import { recordWrite } from './manifest.js';
+import { recordWrite, recordUnwrite } from './manifest.js';
 import {
   indexCodexThread,
   nameCodexThread,
@@ -184,6 +184,7 @@ export function unwriteCodexSession(target, { write = false } = {}) {
     const named = unnameCodexThread(targetId, { write });
     if (named.removed || !write) removed.push('侧边栏索引');
   }
+  if (write) recordUnwrite('codex', target);
   return { tool: 'codex', targetId, path: file, removed };
 }
 

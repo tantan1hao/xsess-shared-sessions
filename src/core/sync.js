@@ -16,7 +16,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { buildHandoff } from './handoff.js';
 import { writeSession, unwriteSession, TIER_A } from './writers/index.js';
-import { listWrites, recordWrite } from './writers/manifest.js';
+import { listWrites } from './writers/manifest.js';
 import { exists } from './paths.js';
 
 /**
@@ -193,17 +193,7 @@ export async function unsync(
     // Antigravity 会报它的会话列表剩多少条，其它工具没有这个概念
     if (Number.isInteger(r.keptRecords)) result.keptRecords = r.keptRecords;
     if (Number.isInteger(r.droppedRecords)) result.droppedRecords += r.droppedRecords;
-
-    if (write) {
-      // appendedId 必须记上：撤销记录靠它和当初的写入记录对上号
-      recordWrite({
-        tool: to,
-        path: info.path || '',
-        kind: 'unsync',
-        appendedId: targetId,
-        sourceSession: info.sourceSession,
-      });
-    }
+    // 撤销记录由 writer 自己记（谁执行删除谁记账），这里不重复记
   }
   return result;
 }
