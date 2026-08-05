@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { TOOLS, encodeClaudeProjectSlug, exists, prefixTitle } from '../paths.js';
-import { recordWrite, recordUnwrite } from './manifest.js';
+import { recordWrite, recordUnwrite, listWrites } from './manifest.js';
 
 const PROJECTS = TOOLS['claude-code'].projects;
 /** 找不到已装版本时的兜底。写错版本号不影响 resume，只影响统计。 */
@@ -44,6 +44,13 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
   // 从标题派生，跟 Claude Code 自己生成的形状保持一致。
   const slug = toSlug(title, sessionId);
 
+  /**
+   * 每条记录的公共字段。
+   * 返回类型标成宽松的 Record —— 调用方会按记录类型往上加
+   * promptId / origin / message 这些，精确推断反而挡路。
+   * @param {string} type
+   * @returns {Record<string, any>}
+   */
   const base = (type) => ({
     parentUuid,
     isSidechain: false,
@@ -54,10 +61,16 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
     cwd,
     sessionId,
     version,
-    gitBranch: pack.gitBranch || '',
+    // 交接包没带分支信息时省略这个字段，而不是写空字符串 ——
+    // 真实会话这里总有值（分支名或 HEAD），`""` 是「明确声明没有分支」，
+    // 跟「不知道」不是一回事
+    ...(pack.gitBranch ? { gitBranch: pack.gitBranch } : {}),
     slug,
-    // 标明来源，将来在 Claude Code 里看到这条会话能知道它是接力来的
-    entrypoint: 'xsess-handoff',
+    // entrypoint 是 Claude Code 认的枚举（本机真实会话 100/100 都是 claude-desktop）。
+    // 原来写的是自编的 'xsess-handoff' —— 和 Codex 那次把 source 写成 'xsess'
+    // 一样的错：值不认识，会话就从桌面版的侧边栏里被过滤掉。
+    // 来源标识由标题前缀（cx：/ ag：…）和 ~/.xsess/written.jsonl 承担。
+    entrypoint: 'claude-desktop',
   });
 
   // 第一条：交接抬头（来源 / 目标 / 文件清单）。
@@ -161,14 +174,36 @@ export function unwriteClaudeCodeSession(target, { write = false } = {}) {
   return { tool: 'claude-code', targetId: target.targetId, path: target.path, removed };
 }
 
-/** 从已有会话文件里读 Claude Code 版本号，保持写出来的记录跟本机一致 */
+/**
+ * 读本机 Claude Code 的版本号，保持写出来的记录跟真实会话一致。
+ *
+ * 优先读 `~/.claude/sessions/*.json`（正在跑的进程写的运行时状态，
+ * 里面的 version 一定是当前版本）。
+ *
+ * 之前只扫 projects 目录取第一个 .jsonl 的 version，结果被自己污染了：
+ * 整批同步之后目录里几百个文件都是 xsess 写的，而它们的 version 又来自
+ * 这个函数上一次的兜底值 —— 于是版本号被永久锁在 FALLBACK 上，
+ * 跟真实会话对不上。扫目录时要跳过自己写过的文件。
+ */
 function detectVersion() {
+  try {
+    const sessDir = path.join(path.dirname(PROJECTS), 'sessions');
+    for (const f of fs.readdirSync(sessDir)) {
+      if (!f.endsWith('.json')) continue;
+      const v = JSON.parse(fs.readFileSync(path.join(sessDir, f), 'utf8')).version;
+      if (v) return v;
+    }
+  } catch {
+    /* 没有运行时状态文件，退回扫目录 */
+  }
+
+  const ours = ownWrittenFiles();
   try {
     for (const projDir of fs.readdirSync(PROJECTS)) {
       const d = path.join(PROJECTS, projDir);
       if (!fs.statSync(d).isDirectory()) continue;
       for (const f of fs.readdirSync(d)) {
-        if (!f.endsWith('.jsonl')) continue;
+        if (!f.endsWith('.jsonl') || ours.has(f)) continue;
         const head = fs.readFileSync(path.join(d, f), 'utf8').slice(0, 200_000).split('\n');
         for (const line of head) {
           try {
@@ -184,4 +219,17 @@ function detectVersion() {
     /* 目录读不了就用兜底 */
   }
   return FALLBACK_VERSION;
+}
+
+/** xsess 自己写过的会话文件名，探测本机真实配置时要跳过它们 */
+function ownWrittenFiles() {
+  const set = new Set();
+  try {
+    for (const e of listWrites()) {
+      if (e.tool === 'claude-code' && e.path) set.add(path.basename(e.path));
+    }
+  } catch {
+    /* 清单读不了就当没有 */
+  }
+  return set;
 }

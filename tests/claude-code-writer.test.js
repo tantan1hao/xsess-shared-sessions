@@ -93,6 +93,51 @@ test('slug 全会话统一且非空', async (t) => {
   }
 });
 
+test('entrypoint / version 用本机真实取值，不能自己编', async (t) => {
+  const ctx = await writeOne(t);
+  if (!ctx) return;
+  const { unwriteClaudeCodeSession } = await import('../src/core/writers/claude-code.js');
+
+  // 本机真实会话用的 entrypoint（跳过 xsess 自己写的，否则是自己验自己）
+  const { listWrites } = await import('../src/core/writers/manifest.js');
+  const ours = new Set(listWrites().filter((e) => e.tool === 'claude-code').map((e) => path.basename(String(e.path))));
+  const real = new Set();
+  for (const d of fs.readdirSync(PROJECTS)) {
+    const dir = path.join(PROJECTS, d);
+    try {
+      if (!fs.statSync(dir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.jsonl') || ours.has(f)) continue;
+      for (const row of readJsonl(path.join(dir, f)).slice(0, 5)) {
+        if (row.entrypoint) real.add(row.entrypoint);
+      }
+    }
+  }
+  if (!real.size) return t.skip('没有真实会话可对照');
+
+  const r = ctx.write();
+  try {
+    const rows = readJsonl(r.path);
+    const conv = rows.filter((x) => x.type === 'user' || x.type === 'assistant');
+    for (const rec of conv) {
+      // 自己编一个值的后果：桌面版侧边栏把这条会话过滤掉，
+      // 文件写得再对也看不见（Codex 那边的 source 是一模一样的坑）
+      assert.ok(
+        real.has(rec.entrypoint),
+        `entrypoint=${JSON.stringify(rec.entrypoint)} 不在本机真实取值里（${[...real].join(', ')}）`,
+      );
+      assert.match(String(rec.version), /^\d+\.\d+\.\d+/, `version 形状不对：${rec.version}`);
+      // 空字符串是「明确声明没有分支」，跟「不知道」不是一回事
+      assert.notEqual(rec.gitBranch, '', 'gitBranch 不该写空字符串，没有就省略');
+    }
+  } finally {
+    unwriteClaudeCodeSession({ targetId: r.sessionId, path: r.path }, { write: true });
+  }
+});
+
 test('parentUuid 把对话串成一条完整的链', async (t) => {
   const ctx = await writeOne(t);
   if (!ctx) return;
