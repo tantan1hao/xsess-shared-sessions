@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { TOOLS, encodeClaudeProjectSlug, exists, prefixTitle } from '../paths.js';
+import { TOOLS, BACKUP_DIR, ensureXsessDirs, encodeClaudeProjectSlug, exists, prefixTitle } from '../paths.js';
 import { recordWrite, recordUnwrite, listWrites } from './manifest.js';
 import { indexDesktopSession, unindexDesktopSession } from './claude-desktop-index.js';
 
@@ -157,6 +157,134 @@ export function writeClaudeCodeSession(pack, { write = false } = {}) {
     result.indexWarning = idx.reason;
   }
   return result;
+}
+
+/**
+ * 把在别处产生的新对话追加回一条已存在的会话。
+ *
+ * 用于回流：会话接力到 Codex，你在那边接着干了一会，这些新内容要回到
+ * Claude Code 的原会话里，否则回到这边看还停在接力那一刻。
+ *
+ * 安全边界和写新会话一样是**只追加**：读出最后一条记录的 uuid 接上链，
+ * 在文件尾部写新行，已有字节一个都不改。写前备份到 ~/.xsess/backups/。
+ *
+ * @param {string} sessionId 目标会话（`~/.claude/projects/**\/<它>.jsonl`）
+ * @param {{role:string, text:string}[]} messages 要追加的对话
+ * @param {{write?:boolean, note?:string}} [opts] note 会作为一条分隔说明写在最前
+ * @returns {{path:string|null, appended:number, backup?:string, reason?:string}}
+ */
+export function appendClaudeCodeSession(sessionId, messages, { write = false, note } = {}) {
+  const file = findSessionFile(sessionId);
+  if (!file) return { path: null, appended: 0, reason: `找不到会话文件：${sessionId}` };
+  if (!messages.length) return { path: file, appended: 0, reason: '没有要追加的内容' };
+
+  const existing = fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  // 接在最后一条对话记录后面。元数据行（ai-title / last-prompt 之类）
+  // 不参与 parentUuid 链，挑的时候要跳过。
+  const conv = existing.filter((r) => r.type === 'user' || r.type === 'assistant');
+  const last = conv[conv.length - 1];
+  if (!last) return { path: file, appended: 0, reason: '源会话里没有可接续的对话' };
+
+  const template = { ...last };
+  let parentUuid = last.uuid;
+  const now = Date.now();
+  let tick = 0;
+  const records = [];
+
+  const base = (type) => {
+    const r = {
+      parentUuid,
+      isSidechain: false,
+      userType: 'external',
+      type,
+      uuid: randomUUID(),
+      timestamp: new Date(now + tick++).toISOString(),
+      cwd: template.cwd,
+      sessionId,
+      version: template.version || detectVersion(),
+      slug: template.slug,
+      entrypoint: template.entrypoint || 'claude-desktop',
+    };
+    if (template.gitBranch) r.gitBranch = template.gitBranch;
+    return r;
+  };
+
+  const turns = note ? [{ role: 'user', text: note }, ...messages] : messages;
+  for (const m of turns) {
+    const isUser = m.role !== 'assistant';
+    const rec = base(isUser ? 'user' : 'assistant');
+    if (isUser) {
+      rec.promptId = randomUUID();
+      rec.message = { role: 'user', content: [{ type: 'text', text: m.text }] };
+    } else {
+      rec.requestId = `req_xsess_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+      rec.message = {
+        role: 'assistant',
+        model: template.message?.model || 'unknown',
+        id: `msg_xsess_${randomUUID().replace(/-/g, '').slice(0, 20)}`,
+        type: 'message',
+        content: [{ type: 'text', text: m.text }],
+      };
+    }
+    records.push(rec);
+    parentUuid = rec.uuid;
+  }
+  // last-prompt 决定 --resume 列表里显示的「最后一次输入」，跟着更新
+  records.push({
+    type: 'last-prompt',
+    lastPrompt: String(turns[turns.length - 1].text).slice(0, 400),
+    leafUuid: parentUuid,
+    sessionId,
+  });
+
+  const result = { path: file, appended: records.length - 1 };
+  if (!write) return result;
+
+  const backup = backupFile(file);
+  fs.appendFileSync(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+  recordWrite({
+    tool: 'claude-code',
+    path: file,
+    kind: 'append',
+    appendedId: sessionId,
+    sourceSession: sessionId,
+  });
+  return { ...result, backup };
+}
+
+/** 在 projects 目录里按会话 ID 找文件 */
+function findSessionFile(sessionId) {
+  try {
+    for (const d of fs.readdirSync(PROJECTS)) {
+      const p = path.join(PROJECTS, d, `${sessionId}.jsonl`);
+      if (exists(p)) return p;
+    }
+  } catch {
+    /* 目录读不了 */
+  }
+  return null;
+}
+
+/** 追加前留一份底 —— 这是唯一会碰已存在会话文件的路径 */
+function backupFile(file) {
+  ensureXsessDirs();
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = path.join(BACKUP_DIR, `${path.basename(file)}.${stamp}.bak`);
+  fs.copyFileSync(file, dest);
+  return dest;
 }
 
 /**

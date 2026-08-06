@@ -46,6 +46,9 @@ ${c.bold('接力')}
                                            写 antigravity 需要先完全退出它（会出现在它原生的会话列表里）
                                            不给 --to 就只打印/落盘，供你粘贴或 @ 引用
   xsess undo [--tool <名>] [--write]       删掉 xsess 创建过的会话文件（只删自己写的）
+  xsess pull [--write]                     回流：接力过去之后你在那边聊的，拉回源会话
+                                           sync 是单向快照，不回流的话回到源会话
+                                           还停在接力那一刻。只追加，写前自动备份
 
 放进别家工具原生的会话栏（--to codex|antigravity|claude-code，默认 antigravity）
   xsess sync [--to <工具>]                 看状态：已同步几条、有没有残骸、它是否在跑
@@ -115,6 +118,8 @@ export async function main(argv) {
       return cmdUndo(args);
     case 'sync':
       return cmdSync(args);
+    case 'pull':
+      return cmdPull(args);
     case 'mcp':
       return cmdMcp(args);
     case 'daemon':
@@ -765,6 +770,98 @@ async function cmdSync(args) {
   );
   if (st.hint) process.stdout.write(c.gray(`  ${st.hint}\n`));
   return 0;
+}
+
+// ---------------------------------------------------------------- pull
+
+/**
+ * 回流：把接力过去之后、在目标那边产生的新对话拉回源会话。
+ *
+ * sync 是单向快照 —— 复制过去就完事了，你在那边接着干的活回不来。
+ * 这个命令补上回来的那一半。
+ */
+async function cmdPull(args) {
+  const { findDrift, recordPull } = await import('../core/pull.js');
+  const drift = await findDrift({
+    sourceTool: args.to || undefined, // --to：只回流到某一家
+    targetTool: args.from || undefined, // --from：只看某一家产生的新进展
+  });
+
+  if (!drift.length) {
+    process.stdout.write(c.gray('没有需要回流的 —— 接力过去的会话那边都没有新进展。\n'));
+    return 0;
+  }
+
+  const total = drift.reduce((n, d) => n + d.fresh.length, 0);
+  process.stdout.write(
+    `${drift.length} 条会话在目标那边有新进展，共 ${total} 条消息\n\n`,
+  );
+
+  for (const d of drift) {
+    const mark = d.sourceExists ? c.green('←') : c.red('✗');
+    process.stdout.write(
+      `  ${mark} ${c.gray(toolName(d.pair.tool) + ' 里聊了 ' + d.fresh.length + ' 条')} → ${d.sourceTitle}\n`,
+    );
+    for (const m of d.fresh.slice(0, 3)) {
+      const who = m.role === 'user' ? '你' : 'AI';
+      process.stdout.write(c.gray(`      ${who}：${oneLineText(m.text, 62)}\n`));
+    }
+    if (d.fresh.length > 3) process.stdout.write(c.gray(`      …还有 ${d.fresh.length - 3} 条\n`));
+    if (!d.sourceExists) process.stdout.write(c.red('      源会话已不在，回流不了\n'));
+  }
+
+  if (!args.write) {
+    process.stdout.write(c.yellow('\n这是预览。加 --write 才真的写回去。\n'));
+    process.stdout.write(
+      c.gray('回流是在源会话文件尾部追加，已有内容一个字节都不改，写前自动备份。\n'),
+    );
+    return 0;
+  }
+
+  const { appendClaudeCodeSession } = await import('../core/writers/claude-code.js');
+  let ok = 0;
+  let failed = 0;
+  process.stdout.write('\n');
+  for (const d of drift) {
+    if (!d.sourceExists) continue;
+    const [srcTool, srcId] = splitSessionKey(d.pair.sourceSession);
+    if (srcTool !== 'claude-code') {
+      process.stdout.write(c.gray(`  跳过 ${srcTool}（暂时只支持回流到 Claude Code）\n`));
+      continue;
+    }
+    try {
+      const r = appendClaudeCodeSession(srcId, d.fresh, {
+        write: true,
+        note: `⟨回流⟩ 以下 ${d.fresh.length} 条来自 ${toolName(d.pair.tool)}，是这个会话接力过去之后在那边聊的。`,
+      });
+      if (r.appended) {
+        ok++;
+        // 记水位线：目标那边的时间戳不会因为回流而变，不记的话下次还会拉同一批
+        recordPull(`${d.pair.tool}:${d.pair.targetId}`, d.pair.sourceSession);
+        process.stdout.write(c.green('  ✓ ') + `${d.sourceTitle} ← ${r.appended} 条\n`);
+      } else {
+        failed++;
+        process.stdout.write(c.red('  ✗ ') + `${d.sourceTitle} —— ${r.reason}\n`);
+      }
+    } catch (e) {
+      failed++;
+      process.stdout.write(c.red('  ✗ ') + `${d.sourceTitle} —— ${e.message}\n`);
+    }
+  }
+  process.stdout.write(`\n回流 ${ok} 条会话${failed ? `，失败 ${failed} 条` : ''}。备份在 ~/.xsess/backups/\n`);
+  if (ok) process.stdout.write(c.gray('跑一次 xsess scan 让索引跟上。\n'));
+  return failed ? 1 : 0;
+}
+
+/** `claude-code:uuid` → ['claude-code', 'uuid'] */
+function splitSessionKey(key) {
+  const i = String(key).indexOf(':');
+  return i < 0 ? [String(key), ''] : [key.slice(0, i), key.slice(i + 1)];
+}
+
+function oneLineText(s, max) {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max) + '…' : t;
 }
 
 // ---------------------------------------------------------------- mcp
