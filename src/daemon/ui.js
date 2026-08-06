@@ -145,6 +145,7 @@ export function renderUi() {
   <button id="btnPurge" hidden title="清掉索引里挂着、会话文件已不在的残留条目">清理残骸</button>
   <button id="selAll">全选当前列表</button>
   <button id="btnSyncAll" hidden></button>
+  <button id="btnSyncEvery" title="把其它工具的会话全部接入目标的会话栏">一键同步</button>
   <select id="syncTarget" title="同步到哪个工具的原生会话栏"></select>
   <button id="btnSync" class="primary">同步选中</button>
   <button id="btnUnsync">取消同步</button>
@@ -425,13 +426,21 @@ $('syncTarget').onchange = async (e) => {
   await loadList(); // 「已在会话栏」的标记是按目标算的，要跟着重画
 };
 
-$('btnSyncAll').onclick = async () => {
-  const from = state.tool;
+// 一键同步：不用先筛选、不用勾选，把其它工具的会话全部接入目标
+$('btnSyncEvery').onclick = () => batchSync('*', $('btnSyncEvery'));
+
+$('btnSyncAll').onclick = () => batchSync(state.tool, $('btnSyncAll'));
+
+/**
+ * @param {string} from 源工具；'*' 表示除目标以外的所有工具
+ * @param {HTMLButtonElement} btn
+ */
+async function batchSync(from, btn) {
   const toName = NAMES[state.target] || state.target;
-  if (!confirm('把 ' + (NAMES[from] || from) + ' 的全部会话接入 ' + toName + ' 的会话栏吗？\\n只有一两句话的空会话会自动跳过，之后可以一键撤回。')) return;
-  const btn = $('btnSyncAll');
-  btn.disabled = true;
+  const fromName = from === '*' ? '其它工具' : (NAMES[from] || from);
+  if (!confirm('把 ' + fromName + ' 的全部会话接入 ' + toName + ' 的会话栏吗？\\n只有一两句话的空会话会自动跳过，之后可以一键撤回。')) return;
   const label = btn.textContent;
+  btn.disabled = true;
   btn.textContent = '接入中…';
   try {
     const r = await api('/api/sync', {
@@ -448,7 +457,7 @@ $('btnSyncAll').onclick = async () => {
     await loadSync(); await loadList(); await loadStats();
   } catch (e) { toast('接入失败：' + e.message); }
   finally { btn.disabled = false; btn.textContent = label; }
-};
+}
 
 $('btnPurge').onclick = async () => {
   const toName = NAMES[state.target] || state.target;

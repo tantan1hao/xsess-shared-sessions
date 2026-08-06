@@ -160,13 +160,22 @@ async function route(req, res, url) {
     const body = await readJson(req);
     let ids = Array.isArray(body.ids) ? body.ids : [];
 
-    // from：整批接入某一家。列表是分页的，前端凑不齐几百个 ID，
+    // from：整批接入。列表是分页的，前端凑不齐几百个 ID，
     // 而且没必要把它们传过来 —— 服务端自己查一次就行。
+    // `from: '*'` = 除目标自己以外的所有工具，也就是一键同步。
     if (body.from) {
+      const to = body.to || 'antigravity';
       const min = Number.isInteger(body.minMessages) ? body.minMessages : 2;
-      const rows = await listSessions({ tool: body.from, limit: 500 });
-      // 只有一两句话的空会话接过去没意义，只会把对方的列表撑满
-      ids = rows.filter((s) => (s.messageCount || 0) >= min).map((s) => s.id);
+      const everyTool = body.from === '*' || body.from === 'all';
+      const rows = await listSessions({
+        tool: everyTool ? undefined : body.from,
+        limit: 2000,
+      });
+      // 只有一两句话的空会话接过去没意义，只会把对方的列表撑满；
+      // 目标工具自己的会话也不用往自己身上搬
+      ids = rows
+        .filter((s) => s.tool !== to && (s.messageCount || 0) >= min)
+        .map((s) => s.id);
     }
 
     if (!ids.length) return send(res, 400, { error: '没给要同步的会话' });

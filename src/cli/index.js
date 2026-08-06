@@ -646,21 +646,31 @@ async function cmdSync(args) {
     const ids = args._.slice(2);
 
     if (args.from) {
-      // 整批接入某一家。手工拼几百个 ID 不现实，而且容易漏。
+      // 整批接入。手工拼几百个 ID 不现实，而且容易漏。
+      // `--from all` = 除目标自己以外的所有工具，也就是一键同步。
+      const everyTool = args.from === 'all' || args.from === '*';
       const { listSessions } = await import('../core/query.js');
       const rows = await listSessions({
-        tool: args.from,
-        limit: args.limit ? parseInt(args.limit, 10) : 500,
+        tool: everyTool ? undefined : args.from,
+        limit: args.limit ? parseInt(args.limit, 10) : 2000,
         includeSubagents: !!args.all,
       });
-      // 只有一句 hi 的空会话接过去没意义，只会把对方的列表撑满
+      // 只有一句 hi 的空会话接过去没意义，只会把对方的列表撑满；
+      // 目标工具自己的会话更不用往自己身上搬
       const min = args.min ? parseInt(args.min, 10) : 2;
-      const picked = rows.filter((s) => (s.messageCount || 0) >= min);
+      const picked = rows.filter((s) => s.tool !== to && (s.messageCount || 0) >= min);
       resolved = picked.map((s) => s.id);
+
+      const byTool = {};
+      for (const s of picked) byTool[s.tool] = (byTool[s.tool] || 0) + 1;
+      const breakdown = Object.entries(byTool)
+        .sort((a, b) => b[1] - a[1])
+        .map(([t, n]) => `${toolName(t)} ${n}`)
+        .join(' · ');
       process.stdout.write(
         c.gray(
-          `从 ${toolName(args.from)} 选出 ${picked.length} 条` +
-            `（跳过 ${rows.length - picked.length} 条消息数 < ${min} 的${args.all ? '' : '，子代理会话默认不算'}）\n\n`,
+          `选出 ${picked.length} 条${breakdown ? '（' + breakdown + '）' : ''}` +
+            `，跳过 ${rows.length - picked.length} 条${args.all ? '' : '（含子代理会话）'}\n\n`,
         ),
       );
     } else if (ids.length) {

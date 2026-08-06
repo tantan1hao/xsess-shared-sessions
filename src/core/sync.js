@@ -113,12 +113,14 @@ export function targetRunning(tool) {
  * 不重启的话侧边栏里不出现 —— 它只在启动时读一次那个目录，不监听变化。
  */
 export function afterSyncHint(tool) {
+  // 说「侧边栏要重启」会让人以为侧边栏能单独重启 —— 要重启的是整个应用，
+  // 因为它只在启动时读一次会话索引。这里明确写成「⌘Q 退出应用再打开」。
   if (tool === 'codex') {
-    return '终端 codex resume 立刻能看到；ChatGPT.app 的侧边栏要重启才刷新。';
+    return '终端 codex resume 立刻能看到；要在 ChatGPT.app 里看到，得 ⌘Q 退出整个应用再打开。';
   }
   if (tool === 'antigravity') return '打开 Antigravity，在 Conversation History 里就能看到。';
   if (tool === 'claude-code') {
-    return '终端 claude --resume 立刻能看到；Claude 桌面版的侧边栏要 ⌘Q 退出重开才刷新。';
+    return '终端 claude --resume 立刻能看到；要在 Claude 桌面版里看到，得 ⌘Q 退出整个应用再打开。';
   }
   return '';
 }
