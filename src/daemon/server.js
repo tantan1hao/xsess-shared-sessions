@@ -158,7 +158,17 @@ async function route(req, res, url) {
 
   if (p === '/api/sync' && req.method === 'POST') {
     const body = await readJson(req);
-    const ids = Array.isArray(body.ids) ? body.ids : [];
+    let ids = Array.isArray(body.ids) ? body.ids : [];
+
+    // from：整批接入某一家。列表是分页的，前端凑不齐几百个 ID，
+    // 而且没必要把它们传过来 —— 服务端自己查一次就行。
+    if (body.from) {
+      const min = Number.isInteger(body.minMessages) ? body.minMessages : 2;
+      const rows = await listSessions({ tool: body.from, limit: 500 });
+      // 只有一两句话的空会话接过去没意义，只会把对方的列表撑满
+      ids = rows.filter((s) => (s.messageCount || 0) >= min).map((s) => s.id);
+    }
+
     if (!ids.length) return send(res, 400, { error: '没给要同步的会话' });
     return send(
       res,
@@ -175,6 +185,8 @@ async function route(req, res, url) {
       await unsync(Array.isArray(body.ids) && body.ids.length ? body.ids : null, {
         to: body.to || 'antigravity',
         write: body.write !== false,
+        // 只清残骸：索引里挂着、会话文件已不在的那些
+        orphansOnly: !!body.orphansOnly,
       }),
     );
   }

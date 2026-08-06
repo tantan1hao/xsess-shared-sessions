@@ -142,7 +142,9 @@ export function renderUi() {
   <span id="syncState">同步状态加载中…</span>
   <span class="sp"></span>
   <span id="selCount"></span>
+  <button id="btnPurge" hidden title="清掉索引里挂着、会话文件已不在的残留条目">清理残骸</button>
   <button id="selAll">全选当前列表</button>
+  <button id="btnSyncAll" hidden></button>
   <select id="syncTarget" title="同步到哪个工具的原生会话栏"></select>
   <button id="btnSync" class="primary">同步选中</button>
   <button id="btnUnsync">取消同步</button>
@@ -371,6 +373,22 @@ function renderSelCount() {
   // 孤儿也要能撤 —— 它们的 .db 已经没了，state.synced 里不算数，
   // 但索引条目还挂在人家会话栏上，不给按钮就永远清不掉
   $('btnUnsync').disabled = busy || (!state.synced.size && !state.orphans);
+
+  // 「整批接入」只在按工具筛选、且不是往自己身上同步时才有意义。
+  // 列表是分页的（默认 60 条），几百条靠「全选当前列表」凑不齐 ——
+  // 这个按钮把范围交给服务端自己查。
+  const btnAll = $('btnSyncAll');
+  const canBatch = state.tool && state.tool !== state.target;
+  btnAll.hidden = !canBatch;
+  if (canBatch) {
+    btnAll.textContent = '整批接入 ' + (NAMES[state.tool] || state.tool);
+    btnAll.disabled = busy;
+  }
+
+  const btnPurge = $('btnPurge');
+  btnPurge.hidden = !state.orphans;
+  btnPurge.disabled = busy;
+  if (state.orphans) btnPurge.textContent = '清理 ' + state.orphans + ' 条残骸';
 }
 
 async function loadSync() {
@@ -390,8 +408,8 @@ async function loadSync() {
 
   const name = NAMES[state.target] || state.target;
   const orphanNote = state.orphans
-    ? ' · <span class="warn">' + state.orphans + ' 条残留</span>' +
-      '（会话文件已不在，在它列表里点开是空的 —— 用「取消同步」清掉）'
+    ? ' · <span class="warn">' + state.orphans + ' 条残骸</span>' +
+      '（会话文件已不在，在它列表里点开是空的）'
     : '';
   $('syncState').innerHTML = st.running
     ? '<span class="warn">⚠ ' + name + ' 正在运行 —— 它退出时会覆盖写入的内容，' +
@@ -405,6 +423,47 @@ $('syncTarget').onchange = async (e) => {
   state.target = e.target.value;
   await loadSync();
   await loadList(); // 「已在会话栏」的标记是按目标算的，要跟着重画
+};
+
+$('btnSyncAll').onclick = async () => {
+  const from = state.tool;
+  const toName = NAMES[state.target] || state.target;
+  if (!confirm('把 ' + (NAMES[from] || from) + ' 的全部会话接入 ' + toName + ' 的会话栏吗？\\n只有一两句话的空会话会自动跳过，之后可以一键撤回。')) return;
+  const btn = $('btnSyncAll');
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '接入中…';
+  try {
+    const r = await api('/api/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // 不传 ids：几百条让服务端自己查，前端凑不齐（列表是分页的）
+      body: JSON.stringify({ from, to: state.target, write: true }),
+    });
+    const bits = [r.synced.length + ' 条已接入'];
+    if (r.skipped.length) bits.push(r.skipped.length + ' 条已存在');
+    if (r.failed.length) bits.push(r.failed.length + ' 条失败');
+    toast(bits.join('，') + '。' + toName + ' 里就能看到了');
+    state.picked.clear();
+    await loadSync(); await loadList(); await loadStats();
+  } catch (e) { toast('接入失败：' + e.message); }
+  finally { btn.disabled = false; btn.textContent = label; }
+};
+
+$('btnPurge').onclick = async () => {
+  const toName = NAMES[state.target] || state.target;
+  if (!confirm('清掉 ' + state.orphans + ' 条残骸吗？\\n它们的会话文件已经不在了，只剩索引条目挂在 ' + toName + ' 的列表里，点开是空的。')) return;
+  $('btnPurge').disabled = true;
+  try {
+    const r = await api('/api/sync', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: state.target, write: true, orphansOnly: true }),
+    });
+    toast('已清掉 ' + r.removed.length + ' 条残骸');
+    await loadSync(); await loadList();
+  } catch (e) { toast('清理失败：' + e.message); }
+  finally { renderSelCount(); }
 };
 
 $('selAll').onclick = () => {
