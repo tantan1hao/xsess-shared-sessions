@@ -154,7 +154,10 @@ export async function syncMany(ids, opts = {}) {
       continue;
     }
     try {
-      const pack = await buildHandoff(id);
+      // full：同步的语义是「让这条会话出现在另一家的列表里」，
+      // 点开该看到完整历史。用交接包的默认参数会只搬最后 12 轮 ——
+      // 一条 2839 条消息的会话搬过去只剩 13 条，等于搬了个残缺副本。
+      const pack = await buildHandoff(id, { full: true });
       if (!pack) {
         results.failed.push({ id, error: '找不到该会话' });
         if (onProgress) onProgress(done, ids.length, '');

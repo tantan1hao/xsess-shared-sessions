@@ -45,19 +45,33 @@ const TOOL_LABEL = {
 
 /**
  * @param {string} id 会话 ID 或前缀
- * @param {{maxTurns?:number, maxCharsPerTurn?:number}} [opts]
+ * @param {{maxTurns?:number, maxCharsPerTurn?:number, full?:boolean}} [opts]
+ *   full：搬整条会话，不截轮次也不截单条长度。
+ *
+ *   这两种用法的语义不一样，别混：
+ *     接力（handoff）—— 给对面的 AI 一个能接着干的上下文，最后十几轮就够，
+ *                       塞太多反而占它的上下文窗口
+ *     同步（sync）  —— 让这条会话出现在另一家的会话列表里，
+ *                       点开该看到完整历史，截断就成了「搬了个残缺副本」
+ *
+ *   踩过：sync 复用了默认参数，一条 2839 条消息的会话搬过去只剩 13 条。
  * @returns {Promise<HandoffPack|null>}
  */
 export async function buildHandoff(id, opts = {}) {
-  const { maxTurns = 12, maxCharsPerTurn = 2000 } = opts;
+  const { full = false } = opts;
+  const maxTurns = opts.maxTurns ?? (full ? Infinity : 12);
+  const maxCharsPerTurn = opts.maxCharsPerTurn ?? (full ? Infinity : 2000);
 
   // 取全量再自己截，交接包要的是「最后几轮」，不是 getSession 默认的掐头留尾
-  const s = await getSession(id, { maxMessages: 10_000, roles: ['user', 'assistant', 'unknown'] });
+  const s = await getSession(id, {
+    maxMessages: full ? 200_000 : 10_000,
+    roles: ['user', 'assistant', 'unknown'],
+  });
   if (!s) return null;
 
   const goal = extractGoal(s.messages);
   const files = extractFiles(s.messages);
-  const turns = s.messages.slice(-maxTurns);
+  const turns = Number.isFinite(maxTurns) ? s.messages.slice(-maxTurns) : s.messages;
 
   const lines = [];
   lines.push(`# 交接：${s.title}`);

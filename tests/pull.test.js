@@ -162,3 +162,32 @@ test('同步关系和回流水位线读得出来', () => {
     assert.ok(Number.isFinite(t) && t > 0, '水位线该是有效时间戳');
   }
 });
+
+test('同步用全量、接力用摘要 —— 两种语义不能混', async (t) => {
+  const { buildHandoff } = await import('../src/core/handoff.js');
+  const { listSessions } = await import('../src/core/query.js');
+
+  // 挑一条足够长的会话，短会话看不出差别
+  const rows = await listSessions({ limit: 60 });
+  const big = rows.find((r) => (r.messageCount || 0) > 40);
+  if (!big) return t.skip('没有足够长的会话可对比');
+
+  const brief = await buildHandoff(big.id);
+  const full = await buildHandoff(big.id, { full: true });
+  assert.ok(brief && full);
+
+  // 接力：给对面 AI 的上下文，截到最后十几轮
+  assert.ok(brief.turns.length <= 12, `接力模式该截断，实际 ${brief.turns.length} 轮`);
+  // 同步：让会话出现在另一家列表里，点开该是完整历史
+  assert.ok(
+    full.turns.length > brief.turns.length,
+    `full 模式没搬全：${full.turns.length} 轮 vs 接力的 ${brief.turns.length} 轮`,
+  );
+  assert.ok(
+    full.turns.length >= Math.min(big.messageCount, 200),
+    `full 模式该搬完整会话，源有 ${big.messageCount} 条，只搬了 ${full.turns.length} 条`,
+  );
+  // full 模式下单条也不该被截
+  const cut = full.turns.filter((x) => String(x.text).includes('⟨本轮截断'));
+  assert.equal(cut.length, 0, `full 模式下有 ${cut.length} 轮被截断了`);
+});

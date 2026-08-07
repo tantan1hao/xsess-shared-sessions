@@ -19,10 +19,11 @@
  * 和 Antigravity 索引追加、Codex 写回同级。写前照例备份。
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { listWrites, recordWrite } from './writers/manifest.js';
 import { getSession } from './query.js';
-import { exists } from './paths.js';
-import path from 'node:path';
+import { TOOLS, exists } from './paths.js';
 
 /**
  * 宽限期。xsess 写一份会话的耗时在毫秒级，但目标工具可能稍后才落盘，
@@ -142,4 +143,98 @@ export async function findDrift(opts = {}) {
   }
   // 新增多的排前面 —— 那些最值得先看
   return out.sort((a, b) => b.fresh.length - a.fresh.length);
+}
+
+/**
+ * 源会话刚被动过就先别追加。
+ *
+ * 你可能正在那条会话里干活 —— 这时候往文件尾部插几行，会突兀地出现在
+ * 你正在进行的对话中间。等它安静一会儿再回流，晚几分钟没有任何损失。
+ * 手动 `xsess pull --write` 不受这条限制（那是你自己按的）。
+ */
+const ACTIVE_GRACE_MS = 5 * 60_000;
+
+/**
+ * 执行回流。CLI 和 daemon 共用这一个入口。
+ *
+ * @param {{write?:boolean, sourceTool?:string, targetTool?:string,
+ *   skipActive?:boolean, onEach?:(r:any)=>void}} [opts]
+ *   skipActive：跳过刚被动过的源会话（自动回流该开，手动执行不用）
+ */
+export async function pullAll(opts = {}) {
+  const { write = false, sourceTool, targetTool, skipActive = false, onEach } = opts;
+  const drift = await findDrift({ sourceTool, targetTool });
+  const results = { pulled: [], skipped: [], failed: [], drift };
+  if (!drift.length) return results;
+
+  const { appendClaudeCodeSession } = await import('./writers/claude-code.js');
+  const now = Date.now();
+
+  for (const d of drift) {
+    const [srcTool, srcId] = splitKey(d.pair.sourceSession);
+    const entry = { targetKey: `${d.pair.tool}:${d.pair.targetId}`, source: d.pair.sourceSession, count: d.fresh.length };
+
+    if (!d.sourceExists) {
+      results.skipped.push({ ...entry, reason: '源会话已不在' });
+      continue;
+    }
+    // 目前只有 Claude Code 支持往已有会话追加。往 Codex 追加要同时改
+    // rollout 和 threads 表的统计，往 Antigravity 要动 protobuf，风险高得多。
+    if (srcTool !== 'claude-code') {
+      results.skipped.push({ ...entry, reason: `暂不支持回流到 ${srcTool}` });
+      continue;
+    }
+    if (skipActive) {
+      const st = statOf(sourceFileOf(srcId));
+      if (st && now - st.mtimeMs < ACTIVE_GRACE_MS) {
+        results.skipped.push({ ...entry, reason: '源会话刚被动过，等它安静下来再回流' });
+        continue;
+      }
+    }
+
+    try {
+      const r = appendClaudeCodeSession(srcId, d.fresh, {
+        write,
+        note: `⟨回流⟩ 以下 ${d.fresh.length} 条来自 ${d.pair.tool}，是这个会话接力过去之后在那边聊的。`,
+      });
+      if (!r.appended) {
+        results.failed.push({ ...entry, reason: r.reason || '没写进去' });
+        continue;
+      }
+      if (write) recordPull(entry.targetKey, d.pair.sourceSession);
+      results.pulled.push({ ...entry, appended: r.appended, title: d.sourceTitle, path: r.path });
+      if (onEach) onEach(results.pulled[results.pulled.length - 1]);
+    } catch (e) {
+      results.failed.push({ ...entry, reason: e.message });
+    }
+  }
+  return results;
+}
+
+/** `claude-code:uuid` → ['claude-code', 'uuid'] */
+function splitKey(key) {
+  const i = String(key).indexOf(':');
+  return i < 0 ? [String(key), ''] : [key.slice(0, i), key.slice(i + 1)];
+}
+
+function sourceFileOf(sessionId) {
+  const root = TOOLS['claude-code'].projects;
+  try {
+    for (const d of fs.readdirSync(root)) {
+      const p = path.join(root, d, `${sessionId}.jsonl`);
+      if (exists(p)) return p;
+    }
+  } catch {
+    /* 目录读不了 */
+  }
+  return null;
+}
+
+function statOf(p) {
+  if (!p) return null;
+  try {
+    return fs.statSync(p);
+  } catch {
+    return null;
+  }
 }
